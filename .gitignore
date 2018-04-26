@@ -1,0 +1,5 @@
+metastore_db/
+__pycache__/
+derby.log
+.pytest_cache/
+login.json
