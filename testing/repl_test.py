@@ -14,29 +14,13 @@ import pandas as pd
 from sklearn.datasets import make_classification
 
 sys.path.append(os.path.abspath('../'))
-from propensity_matching.Estimator import Estimator
-from propensity_matching.Model import Model
-
-
-@pytest.fixture(scope="session")
-def spark_context(request):
-    """ fixture for creating a spark context
-    Args:
-        request: pytest.FixtureRequest object
-    """
-    conf = (SparkConf().setMaster("local[2]").setAppName("pytest-pyspark-local-testing"))
-    spark_context_out = SparkContext(conf=conf)
-    request.addfinalizer(lambda: spark_context_out.stop())
-
-    return spark_context_out
-
-
+from propensity_matching import Estimator
+import importlib
 
 spark = SparkSession.builder.master("local[2]").getOrCreate()
 
 
-
-def gen_df(spark: pyspark.sql.SparkSession, size):
+def get_df(spark: pyspark.sql.SparkSession, size: int=10**5):
     # gen numpy array
     args = {
         "n_samples": size,
@@ -55,30 +39,24 @@ def gen_df(spark: pyspark.sql.SparkSession, size):
         #"shuffle":  ,
         "random_state": 42
     }
-
     data, labels = make_classification(**args)
-
     # gen pandas
     cols = ["{0}__f".format(str(x)) for x in range(len(data[0]))]
     pd_df = pd.DataFrame(data, columns=cols)  # type pandas.DataFrame
     pd_df['label'] = labels
-
     # add response
     treatment_prob, control_prob = .1, .2
     pd_df['response'] = None
-
     pd_df.loc[pd_df.label == 0, 'response'] = np.random.binomial(
         n=1,
         p=control_prob,
         size=pd_df.label.count()-pd_df.label.sum()
     )
-
     pd_df.loc[pd_df.label == 1, 'response'] = np.random.binomial(
         n=1,
         p=treatment_prob,
         size=pd_df.label.sum()
     )
-
     # gen sparkdf
     spark_df = spark.createDataFrame(pd_df)  # type pyspark.sql.DataFrame
     spark_df = spark_df.withColumn('0__e', pyspark.sql.functions.lit(0))
@@ -88,14 +66,27 @@ def gen_df(spark: pyspark.sql.SparkSession, size):
     spark_df.cache()
     return spark_df
 
-@pytest.fixture(scope="session")
-def small_df():
-    return gen_df(spark, size=10**3)
+df = get_df(spark)
 
-@pytest.fixture(scope="session")
-def med_df():
-    return gen_df(spark, size=10**4)
+non_pred_cols = ['label', 'response', 'features']
+pred_cols = [x for x in df.columns if x not in non_pred_cols]
 
-@pytest.fixture(scope="session")
-def big_df():
-    return gen_df(spark, size=10**5)
+import propensity_matching
+importlib.reload(propensity_matching)
+# importlib.reload(Estimator)
+
+estimator = propensity_matching.Estimator.Estimator(pred_cols)
+model = estimator.fit(df)
+
+t,c = model.transform(df)
+
+treatment_rate, control_rate, adjusted_response = model.impact(t,c)
+
+print("""
+treatment rate: {treatment_rate}
+control_rate: {control_rate}
+adjusted_response: {adjusted_response}
+""".format(treatment_rate=treatment_rate, control_rate=control_rate, adjusted_response=adjusted_response))
+
+post_df = t.union(c.select(t.columns))
+eval_out = model.evaluate(df, post_df, post_df, True)

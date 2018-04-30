@@ -3,3 +3,5 @@ __pycache__/
 derby.log
 .pytest_cache/
 login.json
+launch.json
+settings.json
