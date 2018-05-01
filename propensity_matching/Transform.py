@@ -150,13 +150,13 @@ def sample_dfs(t_df: pyspark.sql.DataFrame, t_fracs: pd.DataFrame, c_can_df: pys
         t_fracs = t_fracs.set_index('match_col').treatment_scaled_sample_fraction.to_dict()
         t_dict = {}
         for key, value in t_fracs.items():
-            t_dict[key] = min(float(value), 1)
+            t_dict[int(key)] = min(float(value), 1)
         t_out = t_df.sampleBy(col='match_col', fractions=t_dict, seed=42)
 
         c_fracs = c_fracs.set_index('match_col').control_scaled_sample_fraction.to_dict()
         c_dict = {}
         for key, value in c_fracs.items():
-            c_dict[key] = float(value)
+            c_dict[int(key)] = float(value)
         c_out = c_can_df.sampleBy(col='match_col', fractions=c_dict, seed=42)
         return t_out, c_out
 
