@@ -9,8 +9,7 @@ from pyspark.ml import classification as mlc
 import pyspark.sql.functions as F
 dataframe = pyspark.sql.DataFrame
 
-
-GROUPED_COL_SEPARATOR = '__'
+from .config import GROUPED_COL_SEPARATOR
 
 # UPGRADE TO DATA CLASS WHEN DATABRICKS SUPPORT 3.7+
 # maybe makes these named tuples
@@ -39,7 +38,7 @@ class PerformanceSummary():
     def __init__(
             self,
             train_prop_mod_perf: Type[PropensityModelPerformanceSummary],
-            test_prop_mod_perf, #: Optional[Type[PropensityModelPerformanceSummary]], werid error
+            test_prop_mod_perf, #: Optional[Type[PropensityModelPerformanceSummary]], weird error
             transform_prop_mod_perf, #: Optional[Type[PropensityModelPerformanceSummary]],
             model_weights: dict,
             model_weights_grouped: Optional[dict],

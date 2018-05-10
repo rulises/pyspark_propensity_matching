@@ -20,6 +20,7 @@ def test_case_small(small_df):
     pred_cols = [x for x in df.columns if x not in non_pred_cols]
     estimator = propensity_matching.Estimator.Estimator(pred_cols)
     model = estimator.fit(df)
+    df = model.df
     t,c = model.transform(df)
     treatment_rate, control_rate, adjusted_response = model.impact(t,c)
     post_df = t.union(c.select(t.columns))
@@ -32,6 +33,7 @@ def test_case_med(med_df):
     pred_cols = [x for x in df.columns if x not in non_pred_cols]
     estimator = propensity_matching.Estimator.Estimator(pred_cols)
     model = estimator.fit(df)
+    df = model.df    
     t,c = model.transform(df)
     treatment_rate, control_rate, adjusted_response = model.impact(t,c)
     post_df = t.union(c.select(t.columns))
@@ -44,6 +46,7 @@ def test_case_big(big_df):
     pred_cols = [x for x in df.columns if x not in non_pred_cols]
     estimator = propensity_matching.Estimator.Estimator(pred_cols)
     model = estimator.fit(df)
+    df = model.df
     t,c = model.transform(df)
     treatment_rate, control_rate, adjusted_response = model.impact(t,c)
     post_df = t.union(c.select(t.columns))

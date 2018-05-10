@@ -1,3 +1,5 @@
+import math
+
 from . import Model
 
 import pyspark.sql.functions as F
@@ -14,6 +16,7 @@ import warnings
 
 import pandas as pd
 
+from .config import SAMPLES_PER_FEATURE
 
 class Estimator(ml.Estimator):
     default_propensity_estimator_args = {
@@ -96,7 +99,26 @@ class Estimator(ml.Estimator):
         return True
 
     def prepare_propensity_model(self):
-        self.propensity_model = self.propensity_estimator(**self.propensity_estimator_args).fit(self.train_set)
+        propensity_model = self.propensity_estimator(**self.propensity_estimator_args).fit(self.train_set)
+
+        #pick fewer predictors in case of overfit
+        train_count = self.train_set.count()
+        if train_count < len(self.pred_cols) * SAMPLES_PER_FEATURE:
+            num_cols = math.floor(train_count / SAMPLES_PER_FEATURE)
+            if num_cols < 5:
+                num_cols = 5
+            cols = list(zip(self.pred_cols, propensity_model.coefficients))
+            cols.sort(key=lambda x: -abs(x[1]))
+            pred_cols = [x[0] for x in cols[0:num_cols]]
+            features_col = self.propensity_estimator_args['featuresCol']
+            refeaturizer = mlf.VectorAssembler(inputCols=pred_cols, outputCol=features_col)
+            self.df = refeaturizer.transform(self.df.drop(features_col))
+            self.train_set = refeaturizer.transform(self.train_set.drop(features_col))
+            self.test_set = refeaturizer.transform(self.test_set.drop(features_col))
+            propensity_model = self.propensity_estimator(**self.propensity_estimator_args).fit(self.train_set)
+            self.pred_cols = pred_cols
+
+        self.propensity_model = propensity_model
         self.propensity_model.pred_cols = self.pred_cols
         return True
 

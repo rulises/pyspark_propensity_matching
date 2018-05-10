@@ -2,6 +2,8 @@ metastore_db/
 __pycache__/
 derby.log
 .pytest_cache/
+.idea/
+.vscode/
 login.json
 launch.json
 settings.json

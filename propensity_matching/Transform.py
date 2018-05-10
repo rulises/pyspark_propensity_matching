@@ -9,18 +9,15 @@ import pyspark.sql.functions as F
 import pyspark.sql.types as T
 import pyspark.ml.classification as mlc
 
+from .config import GRAIN, QUANTILE_ERROR_TOLERANCE, UTIL_BOOST_THRESH_1, UTIL_BOOST_THRESH_2, UTIL_BOOST_THRESH_3
+
 dataframe = pyspark.sql.DataFrame
-QUANTILE_ERROR_TOLERANCE = .05
-UTIL_BOOST_THRESH_1 = 2000
-UTIL_BOOST_THRESH_2 = 4000
-UTIL_BOOST_THRESH_3 = 50000
-GRAIN = .1
 
 
-def score_df(df: dataframe, prop_mod: mlc.LogisticRegressionModel) -> Tuple[dataframe, dataframe, str, int]:
+def score_df(df: dataframe, prop_mod: mlc.LogisticRegressionModel) -> Tuple[dataframe, dataframe, str]:
     scored_df = prop_mod.transform(df)
     prob_col = prop_mod.getOrDefault('probabilityCol')
-    prob_1_col = prob_col+"_1"
+    prob_1_col = prob_col + "_1"
     scored_df = scored_df.withColumn(prob_1_col, F.udf(lambda x: float(x[0]), T.FloatType())(prob_col))
     label_col = prop_mod.getOrDefault('labelCol')
 

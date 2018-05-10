@@ -66,7 +66,7 @@ def get_df(spark: pyspark.sql.SparkSession, size: int=10**5):
     spark_df.cache()
     return spark_df
 
-df = get_df(spark)
+df = get_df(spark, 10**5)
 
 non_pred_cols = ['label', 'response', 'features']
 pred_cols = [x for x in df.columns if x not in non_pred_cols]
@@ -77,7 +77,7 @@ importlib.reload(propensity_matching)
 
 estimator = propensity_matching.Estimator.Estimator(pred_cols)
 model = estimator.fit(df)
-
+df = model.df
 t,c = model.transform(df)
 
 treatment_rate, control_rate, adjusted_response = model.impact(t,c)

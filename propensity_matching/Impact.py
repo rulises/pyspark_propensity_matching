@@ -7,9 +7,7 @@ import pyspark.ml.feature as mlf
 import pyspark.ml.classification as mlc
 dataframe = pyspark.sql.DataFrame
 
-NO_IMPACT_THRESHOLD_COUNT = 2000
-NAIVE_THRESHOLD_COUNT = 4000
-SAMPLES_PER_FEATURE = 100
+from .config import NAIVE_THRESHOLD_COUNT, NO_IMPACT_THRESHOLD_COUNT, SAMPLES_PER_FEATURE
 
 
 def impact(df: pyspark.sql.DataFrame, label_col: str, response_col: str, pred_cols_coefficients: zip) -> Tuple[float, float, float]:
