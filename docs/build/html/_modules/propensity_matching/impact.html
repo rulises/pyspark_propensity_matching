@@ -1,0 +1,191 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>propensity_matching.impact &#8212; propensity_matching  documentation</title>
+    <link rel="stylesheet" href="../../_static/nature.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    <script type="text/javascript" src="../../_static/documentation_options.js"></script>
+    <script type="text/javascript" src="../../_static/jquery.js"></script>
+    <script type="text/javascript" src="../../_static/underscore.js"></script>
+    <script type="text/javascript" src="../../_static/doctools.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+  </head><body>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" accesskey="U">Module code</a> &#187;</li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <h1>Source code for propensity_matching.impact</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span> <span class="nn">math</span>
+
+<span class="kn">from</span> <span class="nn">typing</span> <span class="k">import</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Type</span>
+
+<span class="kn">import</span> <span class="nn">pyspark</span>
+<span class="kn">import</span> <span class="nn">pyspark.ml.feature</span> <span class="k">as</span> <span class="nn">mlf</span>
+<span class="kn">import</span> <span class="nn">pyspark.ml.classification</span> <span class="k">as</span> <span class="nn">mlc</span>
+
+<span class="kn">from</span> <span class="nn">.config</span> <span class="k">import</span> <span class="n">NAIVE_THRESHOLD_COUNT</span><span class="p">,</span> <span class="n">SAMPLES_PER_FEATURE</span><span class="p">,</span> <span class="n">MINIMUM_POS_COUNT</span>
+<span class="kn">from</span> <span class="nn">.utils</span> <span class="k">import</span> <span class="n">reduce_dimensionality</span><span class="p">,</span> <span class="n">bin_features</span><span class="p">,</span> <span class="n">_persist_if_unpersisted</span><span class="p">,</span> <span class="n">_get_pred_cols</span>
+
+
+<div class="viewcode-block" id="impact"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.impact.impact">[docs]</a><span class="k">def</span> <span class="nf">impact</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">pyspark</span><span class="o">.</span><span class="n">sql</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
+           <span class="n">response_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+           <span class="n">prob_mod</span><span class="p">:</span> <span class="n">Type</span><span class="p">[</span><span class="n">mlc</span><span class="o">.</span><span class="n">Model</span><span class="p">]</span>
+           <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;observe impact of treatment on response variable</span>
+
+<span class="sd">    currently response must be binary</span>
+<span class="sd">    if the df is small enough return naive difference in groupby label</span>
+<span class="sd">    response mean. otherwise do additional regression on response col</span>
+<span class="sd">    with label as predictor and use its coefficient as a measure of its</span>
+<span class="sd">    impact. binning and dimensionality reduction will occur if necessary</span>
+<span class="sd">    to do an effective regression</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df: pyspark.sql.DataFrame</span>
+<span class="sd">    response_col: str</span>
+<span class="sd">    prob_mod: Type[mlc.Model]</span>
+<span class="sd">        propensity model, mostly used to keep track of feature_col,</span>
+<span class="sd">        label_col, pred_cols</span>
+<span class="sd">    binned: bool</span>
+<span class="sd">        where the predictor cols binned ?</span>
+
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    treatment_rate : float</span>
+<span class="sd">        treatment response rate</span>
+<span class="sd">    control_rate : float</span>
+<span class="sd">        control response rate</span>
+<span class="sd">    adjusted_response : float</span>
+<span class="sd">        impact of treatment on response, which may be</span>
+<span class="sd">        `control_rate`-`treatment_rate` or may have further bias adjustement</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        when number of rows is less than `MINIMUM_POS_COUNT`*2</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    bin_features</span>
+<span class="sd">    _reduce_dimensionality</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">_persist_if_unpersisted</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+    <span class="n">label_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;labelCol&#39;</span><span class="p">)</span>
+    <span class="n">features_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;featuresCol&#39;</span><span class="p">)</span>
+    <span class="n">pred_cols</span> <span class="o">=</span> <span class="n">_get_pred_cols</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">features_col</span><span class="p">)</span>
+
+    <span class="n">all_count</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+
+    <span class="c1"># safety check</span>
+    <span class="k">if</span> <span class="n">all_count</span> <span class="o">&lt;</span> <span class="n">MINIMUM_POS_COUNT</span> <span class="o">*</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Have less than MINIMUM_POS_COUNT*2 rows, this shouldnt be happening&quot;</span><span class="p">)</span>
+
+    <span class="c1"># dict because 1, 0 for label col are not guaranteed to be ordered</span>
+    <span class="n">naive_response_dict</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="n">response_list</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">response_col</span><span class="p">)</span><span class="o">.</span><span class="n">collect</span><span class="p">()</span>
+    <span class="n">naive_response_dict</span><span class="p">[</span><span class="n">response_list</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="n">label_col</span><span class="p">]]</span> <span class="o">=</span> <span class="n">response_list</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;avg(</span><span class="si">{col}</span><span class="s2">)&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">col</span><span class="o">=</span><span class="n">response_col</span><span class="p">)]</span>
+    <span class="n">naive_response_dict</span><span class="p">[</span><span class="n">response_list</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="n">label_col</span><span class="p">]]</span> <span class="o">=</span> <span class="n">response_list</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="s2">&quot;avg(</span><span class="si">{col}</span><span class="s2">)&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">col</span><span class="o">=</span><span class="n">response_col</span><span class="p">)]</span>
+    <span class="n">treatment_rate</span><span class="p">,</span> <span class="n">control_rate</span> <span class="o">=</span> <span class="n">naive_response_dict</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">naive_response_dict</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="c1"># return early if additional bias reduction is not applicable</span>
+    <span class="k">if</span> <span class="n">all_count</span> <span class="o">&lt;</span> <span class="n">NAIVE_THRESHOLD_COUNT</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">treatment_rate</span><span class="p">,</span> <span class="n">control_rate</span><span class="p">,</span> <span class="p">(</span><span class="n">control_rate</span><span class="o">-</span><span class="n">treatment_rate</span><span class="p">)</span>
+
+    <span class="c1"># choose fewer features if appropriate to prevent overfit. round down</span>
+    <span class="n">num_preds</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="n">df</span><span class="o">.</span><span class="n">count</span><span class="p">()</span><span class="o">/</span><span class="n">SAMPLES_PER_FEATURE</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+    <span class="k">if</span> <span class="n">num_preds</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">pred_cols</span><span class="p">)):</span>
+        <span class="n">kwargs</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s1">&#39;df&#39;</span><span class="p">:</span> <span class="n">df</span><span class="p">,</span>
+            <span class="s1">&#39;label_col&#39;</span><span class="p">:</span> <span class="n">label_col</span><span class="p">,</span>
+            <span class="s1">&#39;binned_features_col&#39;</span><span class="p">:</span> <span class="n">features_col</span>
+            <span class="p">}</span>
+        <span class="n">df</span><span class="p">,</span> <span class="n">pred_cols</span> <span class="o">=</span> <span class="n">reduce_dimensionality</span><span class="p">(</span><span class="n">args</span><span class="o">=</span><span class="n">kwargs</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s1">&#39;chi&#39;</span><span class="p">)</span>
+
+    <span class="n">pred_cols_r</span> <span class="o">=</span> <span class="n">pred_cols</span> <span class="o">+</span> <span class="p">[</span><span class="n">label_col</span><span class="p">]</span>
+    <span class="n">assembler_r</span> <span class="o">=</span> <span class="n">mlf</span><span class="o">.</span><span class="n">VectorAssembler</span><span class="p">(</span><span class="n">inputCols</span><span class="o">=</span><span class="n">pred_cols_r</span><span class="p">,</span> <span class="n">outputCol</span><span class="o">=</span><span class="s1">&#39;features_r&#39;</span><span class="p">)</span>
+    <span class="n">df</span> <span class="o">=</span> <span class="n">assembler_r</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+    <span class="n">_persist_if_unpersisted</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+    <span class="n">lre_r</span> <span class="o">=</span> <span class="n">mlc</span><span class="o">.</span><span class="n">LogisticRegression</span><span class="p">(</span><span class="n">featuresCol</span><span class="o">=</span><span class="s1">&#39;features_r&#39;</span><span class="p">,</span>
+                                   <span class="n">labelCol</span><span class="o">=</span><span class="n">response_col</span><span class="p">,</span>
+                                   <span class="n">predictionCol</span><span class="o">=</span><span class="s1">&#39;prediction_</span><span class="si">{0}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">response_col</span><span class="p">),</span>
+                                   <span class="n">rawPredictionCol</span><span class="o">=</span><span class="s1">&#39;rawPrediction_</span><span class="si">{0}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">response_col</span><span class="p">),</span>
+                                   <span class="n">probabilityCol</span><span class="o">=</span><span class="s1">&#39;probability_</span><span class="si">{0}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">response_col</span><span class="p">))</span>
+    <span class="n">lrm_r</span> <span class="o">=</span> <span class="n">lre_r</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+    <span class="n">coeff_dict</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="n">pred_cols_r</span><span class="p">,</span> <span class="n">lrm_r</span><span class="o">.</span><span class="n">coefficients</span><span class="p">))</span>
+
+    <span class="n">adjusted_response</span> <span class="o">=</span> <span class="n">control_rate</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">math</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">coeff_dict</span><span class="p">[</span><span class="n">label_col</span><span class="p">]))</span>
+    <span class="k">return</span> <span class="n">treatment_rate</span><span class="p">,</span> <span class="n">control_rate</span><span class="p">,</span> <span class="n">adjusted_response</span></div>
+</pre></div>
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" />
+      <input type="submit" value="Go" />
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+    </div>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             >index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" >Module code</a> &#187;</li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+        &#169; Copyright 2018, ruaghaya.
+      Created using <a href="http://sphinx-doc.org/">Sphinx</a> 1.7.4.
+    </div>
+  </body>
+</html>

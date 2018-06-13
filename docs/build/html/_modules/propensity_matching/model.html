@@ -1,0 +1,269 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>propensity_matching.model &#8212; propensity_matching  documentation</title>
+    <link rel="stylesheet" href="../../_static/nature.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    <script type="text/javascript" src="../../_static/documentation_options.js"></script>
+    <script type="text/javascript" src="../../_static/jquery.js"></script>
+    <script type="text/javascript" src="../../_static/underscore.js"></script>
+    <script type="text/javascript" src="../../_static/doctools.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+  </head><body>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" accesskey="U">Module code</a> &#187;</li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <h1>Source code for propensity_matching.model</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;Defines PropensityModel&quot;&quot;&quot;</span>
+<span class="kn">from</span> <span class="nn">typing</span> <span class="k">import</span> <span class="n">Tuple</span>
+<span class="kn">from</span> <span class="nn">collections</span> <span class="k">import</span> <span class="n">namedtuple</span>
+
+<span class="kn">from</span> <span class="nn">pyspark.sql</span> <span class="k">import</span> <span class="n">DataFrame</span>
+<span class="kn">import</span> <span class="nn">pyspark.ml</span> <span class="k">as</span> <span class="nn">ml</span>
+
+
+<span class="kn">from</span> <span class="nn">.evaluate</span> <span class="k">import</span> <span class="n">evaluate</span> <span class="k">as</span> <span class="n">_evaluate</span>
+<span class="kn">from</span> <span class="nn">.impact</span> <span class="k">import</span> <span class="n">impact</span> <span class="k">as</span> <span class="n">_impact</span>
+<span class="kn">from</span> <span class="nn">.transform</span> <span class="k">import</span> <span class="n">transform</span> <span class="k">as</span> <span class="n">_transform</span>
+
+
+<div class="viewcode-block" id="PropensityModel"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.model.PropensityModel">[docs]</a><span class="k">class</span> <span class="nc">PropensityModel</span><span class="p">():</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;The entry point for transform, impact, and evaluate workflows.</span>
+
+<span class="sd">    Parameters / Attributes</span>
+<span class="sd">    -----------------------</span>
+<span class="sd">    prob_mod : pyspark.ml.classification.LogisticRegressionModel</span>
+<span class="sd">        Model obj to predict probability of being in label class 1</span>
+<span class="sd">        prob_mod.pred_cols houses feature columns names</span>
+<span class="sd">        getters are also used to for label and assembled features col</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">        The actual data</span>
+<span class="sd">    train_set : pyspark.sql.DataFrame</span>
+<span class="sd">        data used to train prob_mod</span>
+<span class="sd">    test_set : pyspark.sql.DataFrame</span>
+<span class="sd">        data used to test prob_mod</span>
+<span class="sd">    response_col : str</span>
+<span class="sd">        col holding the response variable</span>
+
+<span class="sd">    Methods</span>
+<span class="sd">    -------</span>
+<span class="sd">    transform(df)</span>
+<span class="sd">        Represent the photo in the given colorspace.</span>
+<span class="sd">    determine_impact(df, matched_treatment, matched_control)</span>
+<span class="sd">        Change the photo&#39;s gamma exposure.</span>
+<span class="sd">    evaluate_performance(pre_df, post_df, transform_df, by_col_group)</span>
+<span class="sd">        Change the photo&#39;s gamma exposure.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                 <span class="n">prob_mod</span><span class="p">,</span>
+                 <span class="n">df</span><span class="p">,</span>
+                 <span class="n">train_set</span><span class="p">,</span>
+                 <span class="n">test_set</span><span class="p">,</span>
+                 <span class="n">response_col</span><span class="p">,</span>
+                 <span class="p">):</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">prob_mod</span> <span class="o">=</span> <span class="n">prob_mod</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">df</span> <span class="o">=</span> <span class="n">df</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">train_set</span> <span class="o">=</span> <span class="n">train_set</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">test_set</span> <span class="o">=</span> <span class="n">test_set</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">response_col</span> <span class="o">=</span> <span class="n">response_col</span>
+
+<div class="viewcode-block" id="PropensityModel.transform"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.model.PropensityModel.transform">[docs]</a>    <span class="k">def</span> <span class="nf">transform</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                  <span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">)</span> <span class="o">-&gt;</span><span class="n">Tuple</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">,</span> <span class="nb">dict</span><span class="p">]:</span>
+        <span class="sa">r</span><span class="sd">&quot;&quot;&quot;A one-line summary that does not use variable names or the</span>
+<span class="sd">        function name.</span>
+
+<span class="sd">        Several sentences providing an extended description. Refer to</span>
+<span class="sd">        variables using back-ticks, e.g. `var`.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        df : pyspark.sql.DataFrame</span>
+<span class="sd">            full dataframe to propensity_match on </span>
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        df: pyspark.sql.DataFrame</span>
+<span class="sd">            matched observations</span>
+<span class="sd">        match_info : dict</span>
+<span class="sd">            depending on matching, contains information about the match</span>
+
+<span class="sd">        Raises</span>
+<span class="sd">        ------</span>
+<span class="sd">        UncaughtExceptiosn</span>
+
+<span class="sd">        See Also</span>
+<span class="sd">        --------</span>
+<span class="sd">        transform in transform.py</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">df</span><span class="p">,</span> <span class="n">match_info</span><span class="o">=</span> <span class="n">_transform</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">prob_mod</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">df</span><span class="p">,</span> <span class="n">match_info</span></div>
+
+<div class="viewcode-block" id="PropensityModel.determine_impact"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.model.PropensityModel.determine_impact">[docs]</a>    <span class="k">def</span> <span class="nf">determine_impact</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                         <span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">)</span><span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+        <span class="sa">r</span><span class="sd">&quot;&quot;&quot;Calculates effect of label col on response col, controlling</span>
+<span class="sd">        for covariates</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        df : pyspark.sql.DataFrame</span>
+
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        treatment_rate : float</span>
+<span class="sd">            % of matched class 1s that have response 1 (as opposed to 0)</span>
+<span class="sd">        control_rate : float</span>
+<span class="sd">            % of matched class 1s that have response 1 (as opposed to 0)</span>
+<span class="sd">        adjusted_response : float</span>
+<span class="sd">            impact of label on reponse col, with further adjustments for bias</span>
+
+<span class="sd">        Raises</span>
+<span class="sd">        ------</span>
+
+<span class="sd">        See Also</span>
+<span class="sd">        --------</span>
+<span class="sd">        impact in impact.py</span>
+
+<span class="sd">        Examples</span>
+<span class="sd">        --------</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">treatment_rate</span><span class="p">,</span> <span class="n">control_rate</span><span class="p">,</span> <span class="n">adjusted_response</span> <span class="o">=</span> <span class="n">_impact</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">df</span><span class="p">,</span>
+                                                                  <span class="n">response_col</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">response_col</span><span class="p">,</span>
+                                                                  <span class="n">prob_mod</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">prob_mod</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">treatment_rate</span><span class="p">,</span> <span class="n">control_rate</span><span class="p">,</span> <span class="n">adjusted_response</span></div>
+
+<div class="viewcode-block" id="PropensityModel.evaluate_performance"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.model.PropensityModel.evaluate_performance">[docs]</a>    <span class="k">def</span> <span class="nf">evaluate_performance</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                             <span class="n">pre_df</span><span class="p">,</span>
+                             <span class="n">post_df</span><span class="p">,</span>
+                             <span class="n">transform_df</span><span class="p">)</span><span class="o">-&gt;</span> <span class="n">namedtuple</span><span class="p">:</span>
+        <span class="sa">r</span><span class="sd">&quot;&quot;&quot;provides goodness metrics for propensity match</span>
+
+<span class="sd">        Considers both the probability model as well as the matching itself</span>
+
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        pre_df : pyspark.sql.DataFrame</span>
+<span class="sd">            dataframe before the propensity matching. used to calculate </span>
+<span class="sd">            starting standard bias</span>
+<span class="sd">        post_df : pyspark.sql.DataFrame</span>
+<span class="sd">            dataframe after propensity matching. used to calculate ending</span>
+<span class="sd">            standard bias</span>
+<span class="sd">        transform_df : pyspark.sql.DataFrame</span>
+<span class="sd">            df transformed by probability model. used to calculate model</span>
+<span class="sd">            goodness metrics on whole dataframe, as opposed to class </span>
+<span class="sd">            balances test and train sets</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        performance_summary : namedtuple</span>
+<span class="sd">            &#39;test_prob_mod_perf&#39;: propensity_model_performance_summary</span>
+<span class="sd">            &#39;train_prob_mod_perf&#39; : propensity_model_performance_summary</span>
+<span class="sd">            &#39;transform_prob_mod_perf&#39; : propensity_model_performance_summary</span>
+<span class="sd">            &#39;bias_df&#39;: pd.DataFrame</span>
+<span class="sd">                for each col has pre, post, absolute reduce, relative</span>
+<span class="sd">                reduced bias</span>
+<span class="sd">            &#39;total_bias_reduced&#39;: float</span>
+<span class="sd">                1 - (sum postbias of features/ sum rebias of features)</span>
+<span class="sd">            &#39;starting_bias_mean&#39;: float</span>
+<span class="sd">                mean of prebias</span>
+<span class="sd">            &#39;starting_bias_var&#39;: float</span>
+<span class="sd">                var of prebias</span>
+<span class="sd">            where</span>
+<span class="sd">                propensity_model_performance_summary : namedtuple</span>
+<span class="sd">                    &#39;auc&#39; : float</span>
+<span class="sd">                    &#39;auprc&#39; : float</span>
+<span class="sd">                        area under precision recall curve</span>
+<span class="sd">                    &#39;threshold&#39; : float</span>
+<span class="sd">                    &#39;informativeness&#39; (f1) : float</span>
+<span class="sd">                    &#39;precision&#39; : float</span>
+<span class="sd">                    &#39;recall&#39; : float</span>
+<span class="sd">                    &#39;accuracy&#39;  : float</span>
+
+
+
+<span class="sd">        Raises</span>
+<span class="sd">        ------</span>
+<span class="sd">        </span>
+<span class="sd">        See Also</span>
+<span class="sd">        --------</span>
+<span class="sd">        evaluate in evaluate.py</span>
+
+
+<span class="sd">        Examples</span>
+<span class="sd">        --------</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">performance_summary</span> <span class="o">=</span> <span class="n">_evaluate</span><span class="p">(</span><span class="n">prob_mod</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">prob_mod</span><span class="p">,</span>
+                                        <span class="n">pre_df</span><span class="o">=</span><span class="n">pre_df</span><span class="p">,</span>
+                                        <span class="n">post_df</span><span class="o">=</span><span class="n">post_df</span><span class="p">,</span>
+                                        <span class="n">test_df</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">test_set</span><span class="p">,</span>
+                                        <span class="n">train_df</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">train_set</span><span class="p">,</span>
+                                        <span class="n">transform_df</span><span class="o">=</span><span class="n">transform_df</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">performance_summary</span></div></div>
+</pre></div>
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" />
+      <input type="submit" value="Go" />
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+    </div>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             >index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" >Module code</a> &#187;</li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+        &#169; Copyright 2018, ruaghaya.
+      Created using <a href="http://sphinx-doc.org/">Sphinx</a> 1.7.4.
+    </div>
+  </body>
+</html>

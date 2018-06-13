@@ -1,0 +1,785 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>propensity_matching.evaluate &#8212; propensity_matching  documentation</title>
+    <link rel="stylesheet" href="../../_static/nature.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    <script type="text/javascript" src="../../_static/documentation_options.js"></script>
+    <script type="text/javascript" src="../../_static/jquery.js"></script>
+    <script type="text/javascript" src="../../_static/underscore.js"></script>
+    <script type="text/javascript" src="../../_static/doctools.js"></script>
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+  </head><body>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             accesskey="I">index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" accesskey="U">Module code</a> &#187;</li> 
+      </ul>
+    </div>  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <h1>Source code for propensity_matching.evaluate</h1><div class="highlight"><pre>
+<span></span><span class="kn">import</span> <span class="nn">warnings</span>
+
+<span class="kn">from</span> <span class="nn">collections</span> <span class="k">import</span> <span class="n">namedtuple</span>
+<span class="kn">from</span> <span class="nn">typing</span> <span class="k">import</span> <span class="n">Type</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Dict</span>
+
+<span class="kn">import</span> <span class="nn">pandas</span> <span class="k">as</span> <span class="nn">pd</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+
+<span class="kn">import</span> <span class="nn">pyspark</span>
+<span class="kn">from</span> <span class="nn">pyspark</span> <span class="k">import</span> <span class="n">StorageLevel</span>
+<span class="kn">from</span> <span class="nn">pyspark.sql</span> <span class="k">import</span> <span class="n">DataFrame</span><span class="p">,</span> <span class="n">Window</span>
+<span class="kn">from</span> <span class="nn">pyspark.ml</span> <span class="k">import</span> <span class="n">classification</span> <span class="k">as</span> <span class="n">mlc</span>
+<span class="kn">from</span> <span class="nn">pyspark.ml</span> <span class="k">import</span> <span class="n">evaluation</span> <span class="k">as</span> <span class="n">mle</span>
+<span class="kn">import</span> <span class="nn">pyspark.sql.functions</span> <span class="k">as</span> <span class="nn">F</span>
+<span class="kn">import</span> <span class="nn">pyspark.sql.types</span> <span class="k">as</span> <span class="nn">T</span>
+
+<span class="kn">from</span> <span class="nn">.utils</span> <span class="k">import</span> <span class="n">_persist_if_unpersisted</span><span class="p">,</span> <span class="n">_get_pred_cols</span>
+
+<span class="c1"># container for model performance</span>
+<span class="n">propensity_model_performance_summary</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s1">&#39;propensity_model_performance_summary&#39;</span><span class="p">,</span> <span class="p">[</span>
+    <span class="s1">&#39;auc&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;auprc&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;threshold&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;informativeness&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;precision&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;recall&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;accuracy&#39;</span>
+    <span class="p">])</span>
+
+<span class="c1"># container for whole operation performance</span>
+<span class="n">performance_summary</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s1">&#39;performance_summary&#39;</span><span class="p">,</span> <span class="p">[</span>
+    <span class="s1">&#39;train_prob_mod_perf&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;test_prob_mod_perf&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;transform_prob_mod_perf&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;bias_df&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;total_bias_reduced&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;starting_bias_mean&#39;</span><span class="p">,</span>
+    <span class="s1">&#39;starting_bias_var&#39;</span>
+    <span class="p">])</span>
+
+
+<div class="viewcode-block" id="evaluate"><a class="viewcode-back" href="../../propensity_matching.html#propensity_matching.evaluate.evaluate">[docs]</a><span class="k">def</span> <span class="nf">evaluate</span><span class="p">(</span><span class="n">prob_mod</span><span class="p">:</span> <span class="n">Type</span><span class="p">[</span><span class="n">pyspark</span><span class="o">.</span><span class="n">ml</span><span class="o">.</span><span class="n">Model</span><span class="p">],</span>
+             <span class="n">pre_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+             <span class="n">post_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+             <span class="n">test_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+             <span class="n">train_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+             <span class="n">transform_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+             <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">performance_summary</span><span class="p">:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;evaluates the goodness of match and the power of the propensity</span>
+<span class="sd">    model</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    prob_mod : pyspark.ml.Model</span>
+<span class="sd">        pyspark model that predict probability row is in postive class</span>
+<span class="sd">        1 in label col</span>
+<span class="sd">    pre_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe before matching. used to assess starting bias. If there</span>
+<span class="sd">        are no positive samples, all goodness of match metrics return None</span>
+<span class="sd">    post_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe after matching used to assess final bias. If there</span>
+<span class="sd">        are no positive samples, all goodness of match metrics return None</span>
+<span class="sd">    test_df : pyspark.sql.DataFrame</span>
+<span class="sd">        test dataset for `prob_mod`. if `None`, test_prob_mod_perf returns</span>
+<span class="sd">        `None`</span>
+<span class="sd">    train_df: pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe `prob_mod` was trained on. if `None`, train_prob_mod_perf</span>
+<span class="sd">        returns `None`</span>
+<span class="sd">    transform_df : pyspark.sql.DataFrame</span>
+<span class="sd">        the whole dataframe. Often a superset of `train_df` and `test_df`</span>
+<span class="sd">        also frequently has different class balance</span>
+<span class="sd">        if `None`, transform_prob_mod_perf returns `None`</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    performance_summary : performance_summary named tuple</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    performance_summary : namedtuple</span>
+<span class="sd">        &#39;test_prob_mod_perf&#39;: propensity_model_performance_summary</span>
+<span class="sd">        &#39;train_prob_mod_perf&#39; : propensity_model_performance_summary</span>
+<span class="sd">        &#39;transform_prob_mod_perf&#39; : propensity_model_performance_summary</span>
+<span class="sd">        &#39;bias_df&#39;: pd.DataFrame</span>
+<span class="sd">            for each col has pre, post, absolute reduce, relative</span>
+<span class="sd">            reduced bias</span>
+<span class="sd">        &#39;total_bias_reduced&#39;: float</span>
+<span class="sd">            1 - (sum postbias of features/ sum rebias of features)</span>
+<span class="sd">        &#39;starting_bias_mean&#39;: float</span>
+<span class="sd">            mean of prebias</span>
+<span class="sd">        &#39;starting_bias_var&#39;: float</span>
+<span class="sd">            var of prebias</span>
+<span class="sd">    propensity_model_performance_summary : namedtuple</span>
+<span class="sd">        &#39;auc&#39; : float</span>
+<span class="sd">        &#39;auprc&#39; : float</span>
+<span class="sd">            area under precision recall curve</span>
+<span class="sd">        &#39;threshold&#39; : float</span>
+<span class="sd">        &#39;informativeness&#39; (f1) : float</span>
+<span class="sd">        &#39;precision&#39; : float</span>
+<span class="sd">        &#39;recall&#39; : float</span>
+<span class="sd">        &#39;accuracy&#39;  : float</span>
+
+<span class="sd">    Bias is calculated on predictors which may or may not be the originally</span>
+<span class="sd">    provided data (e.g. binning, dropping predictors). This is wad but user</span>
+<span class="sd">    should be aware.</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    ValueError</span>
+<span class="sd">        if all model metric dfs are none</span>
+<span class="sd">    UncaughtErrors</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _eval_propensity_model</span>
+<span class="sd">    _eval_match_performance</span>
+
+
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">test_prob_mod_perf</span><span class="p">,</span> <span class="n">train_prob_mod_perf</span><span class="p">,</span> <span class="n">transform_prob_mod_perf</span> <span class="o">=</span> \
+        <span class="n">_eval_propensity_model</span><span class="p">(</span><span class="n">prob_mod</span><span class="o">=</span><span class="n">prob_mod</span><span class="p">,</span> <span class="n">test_df</span><span class="o">=</span><span class="n">test_df</span><span class="p">,</span> <span class="n">train_df</span><span class="o">=</span><span class="n">train_df</span><span class="p">,</span> <span class="n">transform_df</span><span class="o">=</span><span class="n">transform_df</span><span class="p">)</span>
+
+    <span class="n">label_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;labelCol&#39;</span><span class="p">)</span>
+    <span class="n">features_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;featuresCol&#39;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">test_df</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">pred_col_df</span> <span class="o">=</span> <span class="n">test_df</span>
+    <span class="k">elif</span> <span class="n">train_df</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">pred_col_df</span> <span class="o">=</span> <span class="n">train_df</span>
+    <span class="k">elif</span> <span class="n">transform_df</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">pred_col_df</span> <span class="o">=</span> <span class="n">transform_df</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;All model metric dfs are None&quot;</span><span class="p">)</span>
+
+    <span class="n">pred_cols</span> <span class="o">=</span> <span class="n">_get_pred_cols</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">pred_col_df</span><span class="p">,</span> <span class="n">features_col</span><span class="o">=</span><span class="n">features_col</span><span class="p">)</span>
+
+    <span class="n">cols</span> <span class="o">=</span> <span class="n">pred_cols</span> <span class="o">+</span> <span class="p">[</span><span class="n">label_col</span><span class="p">]</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">bias_df</span><span class="p">,</span> <span class="n">total_bias_reduced</span><span class="p">,</span> <span class="n">starting_bias_mean</span><span class="p">,</span> <span class="n">starting_bias_var</span> \
+            <span class="o">=</span> <span class="n">_eval_match_performance</span><span class="p">(</span><span class="n">pre_df</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">cols</span><span class="p">),</span> <span class="n">post_df</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">cols</span><span class="p">),</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">AssertionError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>
+        <span class="n">bias_df</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">total_bias_reduced</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">starting_bias_mean</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">starting_bias_var</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="n">perf_sum</span> <span class="o">=</span> <span class="n">performance_summary</span><span class="p">(</span>
+            <span class="n">train_prob_mod_perf</span><span class="o">=</span><span class="n">train_prob_mod_perf</span><span class="p">,</span>
+            <span class="n">test_prob_mod_perf</span><span class="o">=</span><span class="n">test_prob_mod_perf</span><span class="p">,</span>
+            <span class="n">transform_prob_mod_perf</span><span class="o">=</span><span class="n">transform_prob_mod_perf</span><span class="p">,</span>
+            <span class="n">bias_df</span><span class="o">=</span><span class="n">bias_df</span><span class="p">,</span>
+            <span class="n">total_bias_reduced</span><span class="o">=</span><span class="n">total_bias_reduced</span><span class="p">,</span>
+            <span class="n">starting_bias_mean</span><span class="o">=</span><span class="n">starting_bias_mean</span><span class="p">,</span>
+            <span class="n">starting_bias_var</span><span class="o">=</span><span class="n">starting_bias_var</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">perf_sum</span></div>
+
+
+<span class="k">def</span> <span class="nf">_eval_propensity_model</span><span class="p">(</span><span class="n">prob_mod</span><span class="p">:</span> <span class="n">Type</span><span class="p">[</span><span class="n">pyspark</span><span class="o">.</span><span class="n">ml</span><span class="o">.</span><span class="n">Model</span><span class="p">],</span>
+                           <span class="n">test_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">],</span>
+                           <span class="n">train_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">],</span>
+                           <span class="n">transform_df</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataFrame</span><span class="p">])</span>\
+        <span class="o">-&gt;</span><span class="n">Tuple</span><span class="p">[</span><span class="n">Optional</span><span class="p">[</span><span class="n">propensity_model_performance_summary</span><span class="p">],</span>
+                <span class="n">Optional</span><span class="p">[</span><span class="n">propensity_model_performance_summary</span><span class="p">],</span>
+                <span class="n">Optional</span><span class="p">[</span><span class="n">propensity_model_performance_summary</span><span class="p">]]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;For test, train, and transform df, evaluate the propensity</span>
+<span class="sd">    predicting model.</span>
+
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    prob_mod : pyspark.ml.Model</span>
+<span class="sd">        pyspark model that predict probability row is in postive class</span>
+<span class="sd">        1 in label col</span>
+<span class="sd">    test_df : pyspark.sql.DataFrame</span>
+<span class="sd">        test dataset for `prob_mod`. if `None`, test_prob_mod_perf returns</span>
+<span class="sd">        `None`</span>
+<span class="sd">    train_df: pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe `prob_mod` was trained on. if `None`, train_prob_mod_perf</span>
+<span class="sd">        returns `None`</span>
+<span class="sd">    transform_df : pyspark.sql.DataFrame</span>
+<span class="sd">        the whole dataframe. Often a superset of `train_df` and `test_df`</span>
+<span class="sd">        also frequently has different class balance</span>
+<span class="sd">        if `None`, transform_prob_mod_perf returns `None`</span>
+
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    test_prob_mod_perf : performance_summary</span>
+<span class="sd">    train_prob_mod_perf : performance_summary</span>
+<span class="sd">    transform_prob_mod_perf : performance_summary</span>
+
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _eval_df_model</span>
+
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    if a df is None, it&#39;s corresponding per tuple will instead be None</span>
+
+<span class="sd">    propensity_model_performance_summary : namedtuple</span>
+<span class="sd">        &#39;auc&#39; : float</span>
+<span class="sd">        &#39;auprc&#39; : float</span>
+<span class="sd">            area under precision recall curve</span>
+<span class="sd">        &#39;threshold&#39; : float</span>
+<span class="sd">        &#39;informativeness&#39; (f1) : float</span>
+<span class="sd">        &#39;precision&#39; : float</span>
+<span class="sd">        &#39;recall&#39; : float</span>
+<span class="sd">        &#39;accuracy&#39;  : float</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">train_df</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">train_prob_mod_perf</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">train_prob_mod_perf</span> <span class="o">=</span> <span class="n">_eval_df_model</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">train_df</span><span class="p">,</span> <span class="n">prob_mod</span><span class="o">=</span><span class="n">prob_mod</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">test_df</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">test_prob_mod_perf</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">test_prob_mod_perf</span> <span class="o">=</span> <span class="n">_eval_df_model</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">test_df</span><span class="p">,</span> <span class="n">prob_mod</span><span class="o">=</span><span class="n">prob_mod</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">transform_df</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">transform_prob_mod_perf</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">transform_prob_mod_perf</span> <span class="o">=</span> <span class="n">_eval_df_model</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">transform_df</span><span class="p">,</span> <span class="n">prob_mod</span><span class="o">=</span><span class="n">prob_mod</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">test_prob_mod_perf</span><span class="p">,</span> <span class="n">train_prob_mod_perf</span><span class="p">,</span> <span class="n">transform_prob_mod_perf</span>
+
+
+<span class="k">def</span> <span class="nf">_eval_df_model</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                   <span class="n">prob_mod</span><span class="p">:</span> <span class="n">Type</span><span class="p">[</span><span class="n">pyspark</span><span class="o">.</span><span class="n">ml</span><span class="o">.</span><span class="n">Model</span><span class="p">],</span>
+                   <span class="n">sample_num</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="mi">10</span> <span class="o">**</span> <span class="mi">6</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">propensity_model_performance_summary</span><span class="p">:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;calculate binary classification model metrics on provided dataframe</span>
+
+<span class="sd">    Calculate accuracy, precision, and recall at maximum value for</span>
+<span class="sd">    informativeness (f1) also provide auc and auprc(precision-recall curve)</span>
+
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">        Array_like means all those objects -- lists, nested lists, etc. --</span>
+<span class="sd">        that can be converted to an array.  We can also refer to</span>
+<span class="sd">        variables like `var1`.</span>
+<span class="sd">    prob_mod : pyspark.ml.Model</span>
+<span class="sd">        The type above can either refer to an actual Python type</span>
+<span class="sd">        (e.g. ``int``), or describe the type of the variable in more</span>
+<span class="sd">        detail, e.g. ``(N,) ndarray`` or ``array_like``.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    prob_mod_perf_sum : propensity_model_performance_summary</span>
+
+<span class="sd">    Other Parameters</span>
+<span class="sd">    ----------------</span>
+<span class="sd">    sample_num: int</span>
+<span class="sd">        max sample size to calculate performance. Defaults to 10**6, can be</span>
+<span class="sd">        left as None to avoid sampling</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    propensity_model_performance_summary : namedtuple</span>
+<span class="sd">        &#39;auc&#39; : float</span>
+<span class="sd">        &#39;auprc&#39; : float</span>
+<span class="sd">            area under precision recall curve</span>
+<span class="sd">        &#39;threshold&#39; : float</span>
+<span class="sd">        &#39;informativeness&#39; (f1) : float</span>
+<span class="sd">        &#39;precision&#39; : float</span>
+<span class="sd">        &#39;recall&#39; : float</span>
+<span class="sd">        &#39;accuracy&#39;  : float</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _calc_auc_auprc</span>
+<span class="sd">    _calc_model_metrics</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">_persist_if_unpersisted</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+    <span class="n">all_count</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">sample_num</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="n">all_count</span> <span class="o">&lt;=</span> <span class="n">sample_num</span><span class="p">):</span>
+        <span class="n">sample_df</span> <span class="o">=</span> <span class="n">df</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">frac</span> <span class="o">=</span> <span class="n">sample_num</span> <span class="o">/</span> <span class="n">all_count</span>
+        <span class="n">sample_df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">sample</span><span class="p">(</span><span class="n">withReplacement</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">fraction</span><span class="o">=</span><span class="n">frac</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+        <span class="n">sample_df</span><span class="o">.</span><span class="n">persist</span><span class="p">(</span><span class="n">StorageLevel</span><span class="p">(</span><span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+    <span class="n">label_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;labelCol&#39;</span><span class="p">)</span>
+    <span class="n">prob_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;probabilityCol&#39;</span><span class="p">)</span>
+    <span class="n">features_col</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">getOrDefault</span><span class="p">(</span><span class="s1">&#39;featuresCol&#39;</span><span class="p">)</span>
+    <span class="n">sample_df</span> <span class="o">=</span> <span class="n">prob_mod</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">sample_df</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">features_col</span><span class="p">,</span> <span class="n">label_col</span><span class="p">))</span>
+
+    <span class="n">prob_1_col</span> <span class="o">=</span> <span class="s2">&quot;</span><span class="si">{prob_col}</span><span class="s2">_1&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">prob_col</span><span class="o">=</span><span class="n">prob_col</span><span class="p">)</span>
+    <span class="n">sample_df</span> <span class="o">=</span> <span class="n">sample_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="n">prob_1_col</span><span class="p">,</span> <span class="n">F</span><span class="o">.</span><span class="n">udf</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">x</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="n">T</span><span class="o">.</span><span class="n">DoubleType</span><span class="p">())(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="n">prob_col</span><span class="p">)))</span>
+    <span class="n">sample_df</span><span class="o">.</span><span class="n">persist</span><span class="p">(</span><span class="n">StorageLevel</span><span class="p">(</span><span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+    <span class="n">auc</span><span class="p">,</span> <span class="n">auprc</span> <span class="o">=</span> <span class="n">_calc_auc_auprc</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">sample_df</span><span class="p">,</span> <span class="n">prob_col</span><span class="o">=</span><span class="n">prob_1_col</span><span class="p">,</span> <span class="n">label_col</span><span class="o">=</span><span class="n">label_col</span><span class="p">)</span>
+    <span class="n">metrics_dict</span> <span class="o">=</span> <span class="n">_calc_model_metrics</span><span class="p">(</span><span class="n">df</span><span class="o">=</span><span class="n">sample_df</span><span class="p">,</span> <span class="n">prob_col</span><span class="o">=</span><span class="n">prob_1_col</span><span class="p">,</span> <span class="n">label_col</span><span class="o">=</span><span class="n">label_col</span><span class="p">)</span>
+    <span class="n">metrics_dict</span> <span class="o">=</span> <span class="p">{</span><span class="n">x</span><span class="p">:</span> <span class="n">metrics_dict</span><span class="p">[</span><span class="n">x</span><span class="p">]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">metrics_dict</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span> <span class="k">if</span> <span class="n">x</span> <span class="ow">in</span>
+                    <span class="p">[</span><span class="s1">&#39;threshold&#39;</span><span class="p">,</span> <span class="s1">&#39;informativeness&#39;</span><span class="p">,</span> <span class="s1">&#39;precision&#39;</span><span class="p">,</span> <span class="s1">&#39;recall&#39;</span><span class="p">,</span> <span class="s1">&#39;accuracy&#39;</span><span class="p">]}</span>
+
+    <span class="n">prob_mod_per_sum</span> <span class="o">=</span> <span class="n">propensity_model_performance_summary</span><span class="p">(</span><span class="n">auc</span><span class="o">=</span><span class="n">auc</span><span class="p">,</span> <span class="n">auprc</span><span class="o">=</span><span class="n">auprc</span><span class="p">,</span> <span class="o">**</span><span class="n">metrics_dict</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">prob_mod_per_sum</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_auc_auprc</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                    <span class="n">prob_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+                    <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Given a df, labels, and probabilities, return auc and auprc (area under</span>
+<span class="sd">    precision recall curve)</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">    prob_col : str</span>
+<span class="sd">        colname w/ raw probabilities of being in class 1</span>
+<span class="sd">    label_col : str</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    auc :float</span>
+<span class="sd">    aucprc : float</span>
+<span class="sd">        area under precision recall curve</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    pyspark.ml.evaluation.BinaryClassificationEvaluator</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">auc_eval</span> <span class="o">=</span> <span class="n">mle</span><span class="o">.</span><span class="n">BinaryClassificationEvaluator</span><span class="p">(</span><span class="n">rawPredictionCol</span><span class="o">=</span><span class="n">prob_col</span><span class="p">,</span> <span class="n">labelCol</span><span class="o">=</span><span class="n">label_col</span><span class="p">,</span>
+                                                 <span class="n">metricName</span><span class="o">=</span><span class="s1">&#39;areaUnderROC&#39;</span><span class="p">)</span>
+    <span class="n">auc</span> <span class="o">=</span> <span class="n">auc_eval</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+    <span class="n">auprc_eval</span> <span class="o">=</span> <span class="n">mle</span><span class="o">.</span><span class="n">BinaryClassificationEvaluator</span><span class="p">(</span><span class="n">rawPredictionCol</span><span class="o">=</span><span class="n">prob_col</span><span class="p">,</span> <span class="n">labelCol</span><span class="o">=</span><span class="n">label_col</span><span class="p">,</span>
+                                                   <span class="n">metricName</span><span class="o">=</span><span class="s1">&#39;areaUnderPR&#39;</span><span class="p">)</span>
+    <span class="n">auprc</span> <span class="o">=</span> <span class="n">auprc_eval</span><span class="o">.</span><span class="n">evaluate</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">auc</span><span class="p">,</span> <span class="n">auprc</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_model_metrics</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                        <span class="n">prob_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+                        <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;calc model metrics at max f1 given probabilities and labels</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">    prob_col : str</span>
+<span class="sd">        colname w/ raw probabilities of being in class 1</span>
+<span class="sd">    label_col : str</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    max_metrics : dict</span>
+<span class="sd">        dict with keys : &#39;tp&#39;, &#39;tn&#39;, &#39;fp&#39;, &#39;fn&#39;, &#39;f1&#39;, &#39;accuracy&#39;,</span>
+<span class="sd">        &#39;precision&#39;, &#39;recall&#39; and corresponding values as floats</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtException</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">_persist_if_unpersisted</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="n">prob_col</span><span class="p">)</span><span class="o">.</span><span class="n">pivot</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span><span class="o">.</span><span class="n">count</span><span class="p">()</span><span class="o">.</span><span class="n">fillna</span><span class="p">(</span><span class="n">value</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">metrics_df</span><span class="o">.</span><span class="n">persist</span><span class="p">(</span><span class="n">StorageLevel</span><span class="p">(</span><span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
+
+    <span class="n">window</span> <span class="o">=</span> <span class="n">Window</span><span class="o">.</span><span class="n">orderBy</span><span class="p">(</span><span class="n">prob_col</span><span class="p">)</span><span class="o">.</span><span class="n">rowsBetween</span><span class="p">(</span><span class="n">Window</span><span class="o">.</span><span class="n">unboundedPreceding</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;fn&#39;</span><span class="p">,</span> <span class="n">F</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="mi">1</span><span class="p">)))</span><span class="o">.</span><span class="n">over</span><span class="p">(</span><span class="n">window</span><span class="p">))</span>
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;tn&#39;</span><span class="p">,</span> <span class="n">F</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="mi">0</span><span class="p">)))</span><span class="o">.</span><span class="n">over</span><span class="p">(</span><span class="n">window</span><span class="p">))</span><span class="o">.</span><span class="n">fillna</span><span class="p">(</span><span class="n">value</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">metrics_df</span><span class="o">.</span><span class="n">persist</span><span class="p">(</span><span class="n">StorageLevel</span><span class="p">(</span><span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+    <span class="n">all_count</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+    <span class="n">pos_count</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+    <span class="n">neg_count</span> <span class="o">=</span> <span class="n">all_count</span> <span class="o">-</span> <span class="n">pos_count</span>
+
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;tp&#39;</span><span class="p">,</span> <span class="n">pos_count</span> <span class="o">-</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;fn&#39;</span><span class="p">))</span>
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;fp&#39;</span><span class="p">,</span> <span class="n">neg_count</span> <span class="o">-</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;tn&#39;</span><span class="p">))</span>
+
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;precision&#39;</span><span class="p">,</span> <span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;tp&#39;</span><span class="p">))</span> <span class="o">/</span> <span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;tp&#39;</span><span class="p">)</span> <span class="o">+</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;fp&#39;</span><span class="p">)))</span>
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;recall&#39;</span><span class="p">,</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;tp&#39;</span><span class="p">)</span> <span class="o">/</span> <span class="n">pos_count</span><span class="p">)</span>
+
+    <span class="n">metrics_df</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">withColumn</span><span class="p">(</span><span class="s1">&#39;informativeness&#39;</span><span class="p">,</span>
+                                       <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;precision&#39;</span><span class="p">)</span> <span class="o">*</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;recall&#39;</span><span class="p">))</span> <span class="o">/</span> <span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;precision&#39;</span><span class="p">)</span> <span class="o">+</span> <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;recall&#39;</span><span class="p">)))</span>
+    <span class="n">metrics_df</span><span class="o">.</span><span class="n">persist</span><span class="p">(</span><span class="n">StorageLevel</span><span class="p">(</span><span class="kc">False</span><span class="p">,</span> <span class="kc">True</span><span class="p">,</span> <span class="kc">False</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
+
+    <span class="n">max_metrics</span> <span class="o">=</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+        <span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;informativeness&#39;</span><span class="p">)</span> <span class="o">==</span> <span class="n">metrics_df</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s1">&#39;informativeness&#39;</span><span class="p">)))</span><span class="o">.</span><span class="n">take</span><span class="p">(</span><span class="mi">1</span><span class="p">)[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">])</span><span class="o">.</span><span class="n">take</span><span class="p">(</span><span class="mi">1</span><span class="p">)[</span>
+        <span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">asDict</span><span class="p">()</span>
+    <span class="n">max_metrics</span><span class="p">[</span><span class="s1">&#39;accuracy&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">max_metrics</span><span class="p">[</span><span class="s1">&#39;tp&#39;</span><span class="p">]</span> <span class="o">+</span> <span class="n">max_metrics</span><span class="p">[</span><span class="s1">&#39;tn&#39;</span><span class="p">])</span> <span class="o">/</span> <span class="n">all_count</span>
+    <span class="n">max_metrics</span><span class="p">[</span><span class="s1">&#39;threshold&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_metrics</span><span class="p">[</span><span class="n">prob_col</span><span class="p">]</span>
+
+    <span class="k">return</span> <span class="n">max_metrics</span>
+
+
+<span class="k">def</span> <span class="nf">_eval_match_performance</span><span class="p">(</span><span class="n">pre_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                            <span class="n">post_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                            <span class="n">label_col</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot; evaluate propensity match performance given the pre and post</span>
+<span class="sd">    match samples</span>
+
+<span class="sd">    For each predictor evaluate the starting and ending bias, absolute and</span>
+<span class="sd">    relative bias reduced. On aggregate, evaluate relative bias reduced,</span>
+<span class="sd">    as well as the avg starting bias and its variance</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    pre_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe before matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    post_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe after matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    label_col : str</span>
+
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        each row is a predictor and the columns are normal and</span>
+<span class="sd">        standard pre/post bias. Also includes absolute and relative</span>
+<span class="sd">        bias reduced</span>
+<span class="sd">    total_bias_reduced : float</span>
+<span class="sd">        1 - (sum postbias of features/ sum rebias of features)</span>
+<span class="sd">    starting_bias_mean : float</span>
+<span class="sd">        mean of prebias</span>
+<span class="sd">    starting_bias_var : float</span>
+<span class="sd">        var of prebias</span>
+
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    AssertionError</span>
+<span class="sd">        when either the pre or post df do not have any positive samples</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    some calculations are duplicated e.g. when calculating bias and</span>
+<span class="sd">    standard bias, root bias calculations are done twice. this has not been</span>
+<span class="sd">    removed for ease of maintenance but an opportunity for performance</span>
+<span class="sd">    increase should the need arise.</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _calc_standard_bias_reduced</span>
+<span class="sd">    _calc_bias_reduced</span>
+<span class="sd">    _calc_standard_bias</span>
+<span class="sd">    _calc_bias</span>
+<span class="sd">    _calc_var</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">assert</span> <span class="n">pre_df</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">count</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="s1">&#39;no positive samples in pre_df&#39;</span>
+    <span class="k">assert</span> <span class="n">post_df</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">F</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">count</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="s1">&#39;no positive samples in post_df&#39;</span>
+
+    <span class="n">stan_bias_red_df</span><span class="p">,</span> <span class="n">total_bias_reduced</span> <span class="o">=</span> <span class="n">_calc_standard_bias_reduced</span><span class="p">(</span><span class="n">pre_df</span><span class="p">,</span> <span class="n">post_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+
+    <span class="n">bias_red_df</span><span class="p">,</span> <span class="n">starting_bias_mean</span><span class="p">,</span> <span class="n">starting_bias_var</span> <span class="o">=</span> <span class="n">_calc_bias_reduced</span><span class="p">(</span><span class="n">pre_df</span><span class="p">,</span> <span class="n">post_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">bias_red_df</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">stan_bias_red_df</span><span class="p">,</span> <span class="n">how</span><span class="o">=</span><span class="s1">&#39;outer&#39;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">bias_df</span><span class="p">,</span> <span class="n">total_bias_reduced</span><span class="p">,</span> <span class="n">starting_bias_mean</span><span class="p">,</span> <span class="n">starting_bias_var</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_bias</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+               <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot; given labels and features, calculate bias for each feature</span>
+
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">        df where rows are observations, all columns except `label_col` are</span>
+<span class="sd">        predictors. note: label col must be numeric binary 1 or 0</span>
+<span class="sd">    label_col : str</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        pandas dataframe where predictors are index and only column is</span>
+<span class="sd">        bias</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    bias is defined as mean(x | label=1) - mean(x | label=0)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span><span class="o">.</span><span class="n">toPandas</span><span class="p">()</span><span class="o">.</span><span class="n">transpose</span><span class="p">()</span>
+    <span class="n">bias_df</span><span class="p">[</span><span class="s1">&#39;bias&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">bias_df</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">bias_df</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">bias_df</span><span class="o">.</span><span class="n">reset_index</span><span class="p">()</span>
+    <span class="n">bias_df</span><span class="p">[</span><span class="s1">&#39;index&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">bias_df</span><span class="p">[</span><span class="s1">&#39;index&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;avg\(&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;)&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">bias_df</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s1">&#39;index&#39;</span><span class="p">)[[</span><span class="s1">&#39;bias&#39;</span><span class="p">]]</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">bias_df</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">bias_df</span><span class="o">.</span><span class="n">index</span> <span class="o">!=</span> <span class="s1">&#39;label&#39;</span><span class="p">,</span> <span class="p">:]</span>
+    <span class="k">return</span> <span class="n">bias_df</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_standard_bias</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                        <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;given labels and features, calculate standard bias for each feature</span>
+
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">        df where rows are observations, all columns except `label_col` are</span>
+<span class="sd">        predictors. note: label col must be numeric binary 1 or 0</span>
+<span class="sd">    label_col : str</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        pandas dataframe where predictors are index and only column is</span>
+<span class="sd">        standard bias</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _calc_var</span>
+<span class="sd">    _calc_bias</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+<span class="sd">    standard bias is defined as</span>
+<span class="sd">    (B1-B0)/(((VAR0+VAR1)/2)**.5)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">var_df</span> <span class="o">=</span> <span class="n">_calc_var</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">bias_df</span> <span class="o">=</span> <span class="n">_calc_bias</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+
+    <span class="n">bias_red_df</span> <span class="o">=</span> <span class="n">var_df</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">bias_df</span><span class="p">)</span>
+    <span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;denominator&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">((</span><span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;var_1&#39;</span><span class="p">]</span> <span class="o">+</span> <span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;var_0&#39;</span><span class="p">])</span> <span class="o">/</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;standard_bias&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;bias&#39;</span><span class="p">]</span> <span class="o">/</span> <span class="n">bias_red_df</span><span class="p">[</span><span class="s1">&#39;denominator&#39;</span><span class="p">]</span> <span class="o">*</span> <span class="mi">100</span>
+    <span class="n">bias_red_df</span> <span class="o">=</span> <span class="n">bias_red_df</span><span class="p">[[</span><span class="s1">&#39;standard_bias&#39;</span><span class="p">]]</span>
+    <span class="k">return</span> <span class="n">bias_red_df</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_var</span><span class="p">(</span><span class="n">df</span><span class="p">:</span> <span class="n">pyspark</span><span class="o">.</span><span class="n">sql</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span>
+              <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;calculate variance for each column that isnt the label_col</span>
+
+<span class="sd">     Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    df : pyspark.sql.DataFrame</span>
+<span class="sd">        df where rows are observations, all columns except `label_col` are</span>
+<span class="sd">        predictors.</span>
+<span class="sd">    label_col : str</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        pandas dataframe where predictors are index and only column is</span>
+<span class="sd">        variance</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">pred_cols</span> <span class="o">=</span> <span class="p">[</span><span class="n">x</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">df</span><span class="o">.</span><span class="n">columns</span> <span class="k">if</span> <span class="n">x</span> <span class="o">!=</span> <span class="n">label_col</span><span class="p">]</span>
+    <span class="n">s_var_df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="n">label_col</span><span class="p">)</span><span class="o">.</span><span class="n">agg</span><span class="p">({</span><span class="n">x</span><span class="p">:</span> <span class="s1">&#39;variance&#39;</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">pred_cols</span><span class="p">})</span><span class="o">.</span><span class="n">toPandas</span><span class="p">()</span><span class="o">.</span><span class="n">transpose</span><span class="p">()</span>
+    <span class="n">s_var_df</span> <span class="o">=</span> <span class="n">s_var_df</span><span class="o">.</span><span class="n">reset_index</span><span class="p">()</span>
+    <span class="n">s_var_df</span><span class="p">[</span><span class="s1">&#39;index&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">s_var_df</span><span class="p">[</span><span class="s1">&#39;index&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;)&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;variance\(&#39;</span><span class="p">,</span> <span class="s1">&#39;&#39;</span><span class="p">)</span>
+    <span class="n">s_var_df</span> <span class="o">=</span> <span class="n">s_var_df</span><span class="o">.</span><span class="n">set_index</span><span class="p">(</span><span class="s1">&#39;index&#39;</span><span class="p">)</span>
+    <span class="n">s_var_df</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;var_</span><span class="si">{0}</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">s_var_df</span><span class="o">.</span><span class="n">columns</span><span class="p">]</span>
+    <span class="n">s_var_df</span> <span class="o">=</span> <span class="n">s_var_df</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">s_var_df</span><span class="o">.</span><span class="n">index</span> <span class="o">!=</span> <span class="s1">&#39;label&#39;</span><span class="p">,</span> <span class="p">:]</span>
+    <span class="k">return</span> <span class="n">s_var_df</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_bias_reduced</span><span class="p">(</span><span class="n">pre_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                       <span class="n">post_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                       <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;find the pre/post bias and their difference</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    pre_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe before matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    post_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe after matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    label_col : str</span>
+
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        each row is a predictor and the columns are pre-bias, post-bias,</span>
+<span class="sd">        absolute bias reduced, and relative bias reduced</span>
+<span class="sd">    starting_bias_./mean : float</span>
+<span class="sd">        mean of prebias</span>
+<span class="sd">    starting_bias_var : float</span>
+<span class="sd">        var of prebias</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _calc_bias</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">pre_bias</span> <span class="o">=</span> <span class="n">_calc_bias</span><span class="p">(</span><span class="n">pre_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">pre_bias</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;pre_bias&#39;</span><span class="p">]</span>
+
+    <span class="n">post_bias</span> <span class="o">=</span> <span class="n">_calc_bias</span><span class="p">(</span><span class="n">post_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">post_bias</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;post_bias&#39;</span><span class="p">]</span>
+
+    <span class="n">b_red_df</span> <span class="o">=</span> <span class="n">pre_bias</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">post_bias</span><span class="p">,</span> <span class="n">how</span><span class="o">=</span><span class="s1">&#39;outer&#39;</span><span class="p">)</span>
+    <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;bias_reduced_absolute&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;pre_bias&#39;</span><span class="p">]</span> <span class="o">-</span> <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;post_bias&#39;</span><span class="p">]</span>
+    <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;bias_reduced_relative&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;bias_reduced_absolute&#39;</span><span class="p">]</span> <span class="o">/</span> <span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;pre_bias&#39;</span><span class="p">]</span> <span class="o">*</span> <span class="mi">100</span>
+
+    <span class="c1"># output of pandas method may need to be converted to native float</span>
+    <span class="n">starting_bias_mean</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;pre_bias&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">())</span>
+    <span class="n">starting_bias_var</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">b_red_df</span><span class="p">[</span><span class="s1">&#39;pre_bias&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">var</span><span class="p">())</span>
+
+    <span class="k">return</span> <span class="n">b_red_df</span><span class="p">,</span> <span class="n">starting_bias_mean</span><span class="p">,</span> <span class="n">starting_bias_var</span>
+
+
+<span class="k">def</span> <span class="nf">_calc_standard_bias_reduced</span><span class="p">(</span><span class="n">pre_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                                <span class="n">post_df</span><span class="p">:</span> <span class="n">DataFrame</span><span class="p">,</span>
+                                <span class="n">label_col</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="sa">r</span><span class="sd">&quot;&quot;&quot;given the pre and post match dfs, calculate the standard bias for</span>
+<span class="sd">    each, and how much was reduced.</span>
+
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    pre_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe before matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    post_df : pyspark.sql.DataFrame</span>
+<span class="sd">        dataframe after matching occured. each row should be a sample.</span>
+<span class="sd">        every column except the label col is considered a predictor</span>
+<span class="sd">    label_col : str</span>
+<span class="sd">        note: label column in dfs should be binary numeric 1 or 0</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    bias_df : pd.DataFrame</span>
+<span class="sd">        each row is a predictor and the columns are</span>
+<span class="sd">        standard pre/post bias. Also includes absolute and relative</span>
+<span class="sd">        standard bias reduced</span>
+<span class="sd">    total_bias_reduced : float</span>
+<span class="sd">        measure of total relative bias reduced.</span>
+<span class="sd">        1- (sum of post-bias)/(sum or pre bias)</span>
+
+<span class="sd">    Raises</span>
+<span class="sd">    ------</span>
+<span class="sd">    UncaughtExceptions</span>
+
+
+<span class="sd">    See Also</span>
+<span class="sd">    --------</span>
+<span class="sd">    _calc_standard_bias</span>
+
+<span class="sd">    Notes</span>
+<span class="sd">    -----</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">pre_standard_bias</span> <span class="o">=</span> <span class="n">_calc_standard_bias</span><span class="p">(</span><span class="n">pre_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">pre_standard_bias</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;pre_standard_bias&#39;</span><span class="p">]</span>
+
+    <span class="n">post_standard_bias</span> <span class="o">=</span> <span class="n">_calc_standard_bias</span><span class="p">(</span><span class="n">post_df</span><span class="p">,</span> <span class="n">label_col</span><span class="p">)</span>
+    <span class="n">post_standard_bias</span><span class="o">.</span><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;post_standard_bias&#39;</span><span class="p">]</span>
+
+    <span class="n">stan_bias_red_df</span> <span class="o">=</span> <span class="n">pre_standard_bias</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">post_standard_bias</span><span class="p">,</span> <span class="n">how</span><span class="o">=</span><span class="s1">&#39;outer&#39;</span><span class="p">)</span>
+    <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;standard_bias_reduced_absolute&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;pre_standard_bias&#39;</span><span class="p">]</span> \
+                                                         <span class="o">-</span> <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;post_standard_bias&#39;</span><span class="p">]</span>
+    <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;standard_bias_reduced_relative&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;standard_bias_reduced_absolute&#39;</span><span class="p">]</span> \
+                                                         <span class="o">/</span> <span class="n">stan_bias_red_df</span><span class="p">[</span><span class="s1">&#39;pre_standard_bias&#39;</span><span class="p">]</span> <span class="o">*</span> <span class="mi">100</span>
+
+    <span class="n">total_bias_reduced</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">stan_bias_red_df</span><span class="o">.</span><span class="n">post_standard_bias</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">/</span> <span class="n">stan_bias_red_df</span><span class="o">.</span><span class="n">pre_standard_bias</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span><span class="o">.</span><span class="n">sum</span><span class="p">())</span> <span class="o">*</span> <span class="mi">100</span>
+
+    <span class="c1"># output of pandas method may need to be converted to native float</span>
+    <span class="n">total_bias_reduced</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">total_bias_reduced</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">stan_bias_red_df</span><span class="p">,</span> <span class="n">total_bias_reduced</span>
+</pre></div>
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" />
+      <input type="submit" value="Go" />
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+    </div>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="related" role="navigation" aria-label="related navigation">
+      <h3>Navigation</h3>
+      <ul>
+        <li class="right" style="margin-right: 10px">
+          <a href="../../genindex.html" title="General Index"
+             >index</a></li>
+        <li class="right" >
+          <a href="../../py-modindex.html" title="Python Module Index"
+             >modules</a> |</li>
+        <li class="nav-item nav-item-0"><a href="../../propensity_matching_docs.html">propensity_matching  documentation</a> &#187;</li>
+          <li class="nav-item nav-item-1"><a href="../index.html" >Module code</a> &#187;</li> 
+      </ul>
+    </div>
+    <div class="footer" role="contentinfo">
+        &#169; Copyright 2018, ruaghaya.
+      Created using <a href="http://sphinx-doc.org/">Sphinx</a> 1.7.4.
+    </div>
+  </body>
+</html>
