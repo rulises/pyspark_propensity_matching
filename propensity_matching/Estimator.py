@@ -14,7 +14,7 @@ from .model import PropensityModel
 from .utils import reduce_dimensionality, _persist_if_unpersisted, bin_features, remove_redundant_features
 
 
-class PropensityEstimator():
+class PropensityEstimator:
     """
     ml.Estimator to fit and return a PropensityModel.
 
@@ -49,7 +49,6 @@ class PropensityEstimator():
             probability_estimator_args=default_probability_estimator_args,
             probability_estimator=mlc.LogisticRegression,
             response_col='response' )
-        Represent the photo in the given colorspace.
     fit(df: pyspark.sql.DataFrame)
         return PropensityModel
     """
@@ -73,19 +72,17 @@ class PropensityEstimator():
         "family": "binomial"
     }
 
-
     default_fit_data_prep_args = {
         'class_balance': 1,
         'train_prop': .8,
-        'bin_features':True,
-        'remove_redundant_features':True,
+        'bin_features': True,
+        'remove_redundant_features': True,
         }
 
     def __init__(self,
                  fit_data_prep_args: Optional[dict] = None,
-                 probability_estimator: Optional[Type[ml.Estimator]] = None,
-                 response_col: str ='response'
-                 ):
+                 probability_estimator: Optional[ml.Estimator] = None,
+                 response_col: str ='response'):
         r"""
         Parameters
         ----------
@@ -117,11 +114,10 @@ class PropensityEstimator():
             args. Dict will passed as kwargs instead.
             see utils.remove_redundant_features for arg details
 
+        probability_estimator: Type[ml.Estimator] = mlc.LogisticRegression
 
-        probability_estimator_args: Optional[dict] = None,
-            kwargs for probability estimator. default args are
-
-            default_probability_estimator_args = {
+                default args are
+                default_probability_estimator_args = {
                 "featuresCol": "features",
                 "labelCol": "label",
                 "predictionCol": "prediction",
@@ -135,7 +131,7 @@ class PropensityEstimator():
             value error will be returned. Correct labelCol and featuresCol
             are crucial so special attention should be paid to specify them
 
-        probability_estimator: Type[ml.Estimator] = mlc.LogisticRegression
+
         response_col: str ='response'
             column in df containt the response
 
@@ -144,7 +140,7 @@ class PropensityEstimator():
         UncaughtExceptions
         """
 
-        if  probability_estimator is None:
+        if probability_estimator is None:
             probability_estimator = mlc.LogisticRegression(**self.default_probability_estimator_args)
 
         if fit_data_prep_args is None:
@@ -153,7 +149,6 @@ class PropensityEstimator():
         self.fit_data_prep_args = fit_data_prep_args
         self.probability_estimator = probability_estimator
         self.response_col = response_col
-
 
     def fit(self, df: pys.DataFrame) -> Tuple[PropensityModel, DataFrame]:
         """
@@ -166,7 +161,8 @@ class PropensityEstimator():
         Parameters
         ----------
         df : pyspark.sql.DataFrame
-            dataframe containing desired data. Must have predictor columns as well as features, label column specificed in
+            dataframe containing desired data. Must have predictor columns
+            as well as features, label column specificed in
             propensity_estimator_args and response col given in __init__
 
         Returns
@@ -268,7 +264,7 @@ class PropensityEstimator():
         features_col = self.probability_estimator.getOrDefault('featuresCol')
         label_col = self.probability_estimator.getOrDefault('labelCol')
 
-        if ('remove_redundant_features' not in  self.fit_data_prep_args) | (self.fit_data_prep_args['remove_redundant_features'] is True):
+        if ('remove_redundant_features' not in self.fit_data_prep_args) | (self.fit_data_prep_args['remove_redundant_features'] is True):
             df, pred_cols = remove_redundant_features(df=df, features_col=features_col)
         elif isinstance(self.fit_data_prep_args['remove_redundant_features'], dict):
             df, pred_cols = remove_redundant_features(df=df, **self.fit_data_prep_args['remove_redundant_features'])
@@ -276,7 +272,7 @@ class PropensityEstimator():
             pass
         else: raise ValueError('illegal argument for "remove_redundant_features" in fit_data_prep_args')
 
-        if ('bin_features' not in  self.fit_data_prep_args) | (self.fit_data_prep_args['bin_features'] is True):
+        if ('bin_features' not in self.fit_data_prep_args) | (self.fit_data_prep_args['bin_features'] is True):
             df, pred_cols = bin_features(df=df, features_col=features_col)
         elif isinstance(self.fit_data_prep_args['bin_features'], dict):
             df, pred_cols = bin_features(df=df, **self.fit_data_prep_args['bin_features'])
@@ -294,14 +290,13 @@ class PropensityEstimator():
         ncols = int((self.rebalanced_df.where(F.col(label_col)==1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
         del self.df
         del self.rebalanced_df
-        red_dim_args = {'df':df,
+        red_dim_args = {'df': df,
                         'label_col': label_col,
                         'binned_features_col': features_col,
                         'ncols': ncols}
         df, pred_cols = reduce_dimensionality(args=red_dim_args)
 
         return df
-
 
     def _rebalance_df(self,) -> bool:
         """
