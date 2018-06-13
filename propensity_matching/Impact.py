@@ -1,44 +1,102 @@
 import math
 
-from typing import Tuple
+from typing import Tuple, Type
 
 import pyspark
 import pyspark.ml.feature as mlf
 import pyspark.ml.classification as mlc
-dataframe = pyspark.sql.DataFrame
 
-from .config import NAIVE_THRESHOLD_COUNT, NO_IMPACT_THRESHOLD_COUNT, SAMPLES_PER_FEATURE
+from .config import NAIVE_THRESHOLD_COUNT, SAMPLES_PER_FEATURE, MINIMUM_POS_COUNT
+from .utils import reduce_dimensionality, bin_features, _persist_if_unpersisted, _get_pred_cols
 
 
-def impact(df: pyspark.sql.DataFrame, label_col: str, response_col: str, pred_cols_coefficients: zip) -> Tuple[float, float, float]:
-    count_ = df.count()
+def impact(df: pyspark.sql.DataFrame,
+           response_col: str,
+           prob_mod: Type[mlc.Model]
+           ) -> Tuple[float, float, float]:
+    r"""observe impact of treatment on response variable
 
-    if count_ < NO_IMPACT_THRESHOLD_COUNT:
-        return 0, 0, 0
+    currently response must be binary
+    if the df is small enough return naive difference in groupby label
+    response mean. otherwise do additional regression on response col
+    with label as predictor and use its coefficient as a measure of its
+    impact. binning and dimensionality reduction will occur if necessary
+    to do an effective regression
 
-    # can we use accessors to remove the dict entirely? HACK feels ugly
+    Parameters
+    ----------
+    df: pyspark.sql.DataFrame
+    response_col: str
+    prob_mod: Type[mlc.Model]
+        propensity model, mostly used to keep track of feature_col,
+        label_col, pred_cols
+    binned: bool
+        where the predictor cols binned ?
+
+
+    Returns
+    -------
+    treatment_rate : float
+        treatment response rate
+    control_rate : float
+        control response rate
+    adjusted_response : float
+        impact of treatment on response, which may be
+        `control_rate`-`treatment_rate` or may have further bias adjustement
+
+    Raises
+    ------
+    ValueError
+        when number of rows is less than `MINIMUM_POS_COUNT`*2
+    UncaughtExceptions
+
+    See Also
+    --------
+    bin_features
+    _reduce_dimensionality
+
+    Notes
+    -----
+
+    """
+
+    _persist_if_unpersisted(df)
+
+    label_col = prob_mod.getOrDefault('labelCol')
+    features_col = prob_mod.getOrDefault('featuresCol')
+    pred_cols = _get_pred_cols(df, features_col)
+
+    all_count = df.count()
+
+    # safety check
+    if all_count < MINIMUM_POS_COUNT * 2:
+        raise ValueError("Have less than MINIMUM_POS_COUNT*2 rows, this shouldnt be happening")
+
+    # dict because 1, 0 for label col are not guaranteed to be ordered
     naive_response_dict = dict()
     response_list = df.groupby(label_col).mean(response_col).collect()
     naive_response_dict[response_list[0][label_col]] = response_list[0]["avg({col})".format(col=response_col)]
     naive_response_dict[response_list[1][label_col]] = response_list[1]["avg({col})".format(col=response_col)]
     treatment_rate, control_rate = naive_response_dict[1], naive_response_dict[0]
 
-    if count_ < NAIVE_THRESHOLD_COUNT:
-        return treatment_rate, control_rate, control_rate-treatment_rate
+    # return early if additional bias reduction is not applicable
+    if all_count < NAIVE_THRESHOLD_COUNT:
+        return treatment_rate, control_rate, (control_rate-treatment_rate)
 
     # choose fewer features if appropriate to prevent overfit. round down
-    num_preds = int(df.count()/SAMPLES_PER_FEATURE)-1
-    if num_preds < len(list(pred_cols_coefficients)):
-        weights = sorted(pred_cols_coefficients, key=lambda x: -abs(x[1]))
-        weights = weights[0:num_preds]
-        pred_cols = [x[0] for x in weights]
-    else:
-        pred_cols = [x[0] for x in pred_cols_coefficients]
+    num_preds = math.floor(df.count()/SAMPLES_PER_FEATURE) - 1
+    if num_preds < len(list(pred_cols)):
+        kwargs = {
+            'df': df,
+            'label_col': label_col,
+            'binned_features_col': features_col
+            }
+        df, pred_cols = reduce_dimensionality(args=kwargs, method='chi')
 
     pred_cols_r = pred_cols + [label_col]
     assembler_r = mlf.VectorAssembler(inputCols=pred_cols_r, outputCol='features_r')
     df = assembler_r.transform(df)
-    df.cache()
+    _persist_if_unpersisted(df)
     lre_r = mlc.LogisticRegression(featuresCol='features_r',
                                    labelCol=response_col,
                                    predictionCol='prediction_{0}'.format(response_col),

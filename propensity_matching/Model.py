@@ -1,16 +1,21 @@
 """Defines PropensityModel"""
+from typing import Tuple
+from collections import namedtuple
+
+from pyspark.sql import DataFrame
 import pyspark.ml as ml
+
 
 from .evaluate import evaluate as _evaluate
 from .impact import impact as _impact
 from .transform import transform as _transform
 
 
-class PropensityModel(ml.Model):
+class PropensityModel():
     r"""The entry point for transform, impact, and evaluate workflows.
 
     Parameters / Attributes
-    ----------
+    -----------------------
     prob_mod : pyspark.ml.classification.LogisticRegressionModel
         Model obj to predict probability of being in label class 1
         prob_mod.pred_cols houses feature columns names
@@ -28,9 +33,9 @@ class PropensityModel(ml.Model):
     -------
     transform(df)
         Represent the photo in the given colorspace.
-    impact(df, matched_treatment, matched_control)
+    determine_impact(df, matched_treatment, matched_control)
         Change the photo's gamma exposure.
-    evaluate(pre_df, post_df, transform_df, by_col_group)
+    evaluate_performance(pre_df, post_df, transform_df, by_col_group)
         Change the photo's gamma exposure.
     """
     def __init__(self,
@@ -47,44 +52,44 @@ class PropensityModel(ml.Model):
         self.test_set = test_set
         self.response_col = response_col
 
-    def transform(self, df):
-            r"""A one-line summary that does not use variable names or the
-    function name.
+    def transform(self,
+                  df: DataFrame) ->Tuple[DataFrame, dict]:
+        r"""A one-line summary that does not use variable names or the
+        function name.
 
-    Several sentences providing an extended description. Refer to
-    variables using back-ticks, e.g. `var`.
+        Several sentences providing an extended description. Refer to
+        variables using back-ticks, e.g. `var`.
 
-    Parameters
-    ----------
-    df : pyspark.sql.DataFrame
-        full dataframe to propensity_match on 
-    Returns
-    -------
-    matched_treatment : pyspark.sql.DataFrame
-        matched rows in class 1
-    matched_control : pyspark.sql.DataFrame
-        matched rows in class 0
+        Parameters
+        ----------
+        df : pyspark.sql.DataFrame
+            full dataframe to propensity_match on 
+        Returns
+        -------
+        df: pyspark.sql.DataFrame
+            matched observations
+        match_info : dict
+            depending on matching, contains information about the match
 
-    Raises
-    ------
+        Raises
+        ------
+        UncaughtExceptiosn
 
-    See Also
-    --------
-    transform in transform.py
-    """
-        matched_treatment, matched_control = _transform(df, self.prob_mod)
-        return matched_treatment, matched_control
+        See Also
+        --------
+        transform in transform.py
+        """
+        df, match_info= _transform(df, self.prob_mod)
+        return df, match_info
 
-    def determine_impact(self, matched_treatment, matched_control):
+    def determine_impact(self,
+                         df: DataFrame)-> Tuple[float, float, float]:
         r"""Calculates effect of label col on response col, controlling
         for covariates
 
         Parameters
         ----------
-        matched_treatment : pyspark.sql.DataFrame
-            matched rows in class 1
-        matched_control : pyspark.sql.DataFrame
-            matched rows in class 0
+        df : pyspark.sql.DataFrame
 
 
         Returns
@@ -106,16 +111,16 @@ class PropensityModel(ml.Model):
         Examples
         --------
         """
-        in_df = matched_treatment.union(matched_control.select(matched_treatment.columns))
-        in_df.cache()
-        label_col = self.prob_mod.getOrDefault('labelCol')
-        response_col = self.response_col
-        pred_cols_coefficients = zip(self.prob_mod.pred_cols, self.prob_mod.coefficients)
 
-        treatment_rate, control_rate, adjusted_response = _impact(in_df, label_col, response_col, pred_cols_coefficients)
+        treatment_rate, control_rate, adjusted_response = _impact(df=df,
+                                                                  response_col=self.response_col,
+                                                                  prob_mod=self.prob_mod)
         return treatment_rate, control_rate, adjusted_response
 
-    def evaluate_performance(self, pre_df, post_df, transform_df, by_col_group=True):
+    def evaluate_performance(self,
+                             pre_df,
+                             post_df,
+                             transform_df)-> namedtuple:
         r"""provides goodness metrics for propensity match
 
         Considers both the probability model as well as the matching itself
@@ -133,19 +138,33 @@ class PropensityModel(ml.Model):
             df transformed by probability model. used to calculate model
             goodness metrics on whole dataframe, as opposed to class 
             balances test and train sets
-        by_col_group : bool = False, optional
-            groups feature coefficients by source, as determined by prefix
-            split by `GROUPED_COL_SEPARATOR` in config.py, into groups.
-            An additional dict will be returned with the sum of the absolute
-            value of the coeffs for each feature in a group. Because
-            individual columns may vary from day to day, this is intended
-            to verify model stability. not informative if user does not
-            normalize variables beforehand 
 
         Returns
         -------
-        performance_summary
-            instance of PerformanceSummary class
+        performance_summary : namedtuple
+            'test_prob_mod_perf': propensity_model_performance_summary
+            'train_prob_mod_perf' : propensity_model_performance_summary
+            'transform_prob_mod_perf' : propensity_model_performance_summary
+            'bias_df': pd.DataFrame
+                for each col has pre, post, absolute reduce, relative
+                reduced bias
+            'total_bias_reduced': float
+                1 - (sum postbias of features/ sum rebias of features)
+            'starting_bias_mean': float
+                mean of prebias
+            'starting_bias_var': float
+                var of prebias
+            where
+                propensity_model_performance_summary : namedtuple
+                    'auc' : float
+                    'auprc' : float
+                        area under precision recall curve
+                    'threshold' : float
+                    'informativeness' (f1) : float
+                    'precision' : float
+                    'recall' : float
+                    'accuracy'  : float
+
 
 
         Raises
@@ -160,5 +179,10 @@ class PropensityModel(ml.Model):
         --------
 
         """
-        performance_summary = _evaluate(self.prob_mod, pre_df, post_df, self.test_set, transform_df, by_col_group)
+        performance_summary = _evaluate(prob_mod=self.prob_mod,
+                                        pre_df=pre_df,
+                                        post_df=post_df,
+                                        test_df=self.test_set,
+                                        train_df=self.train_set,
+                                        transform_df=transform_df)
         return performance_summary

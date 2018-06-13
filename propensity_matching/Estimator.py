@@ -1,8 +1,9 @@
 """module holding PropensityEstimator (ml.Estimator)."""
-from typing import List, Optional, Type
+from typing import List, Optional, Type, Tuple
 from math import floor
 import warnings
 
+from pyspark.sql import DataFrame
 import pyspark.sql as pys
 import pyspark.sql.functions as F
 import pyspark.ml as ml
@@ -10,41 +11,40 @@ import pyspark.ml.classification as mlc
 
 from .config import MINIMUM_DF_COUNT, MINIMUM_POS_COUNT, SAMPLES_PER_FEATURE
 from .model import PropensityModel
-from .utils import reduce_dimensionality
+from .utils import reduce_dimensionality, _persist_if_unpersisted, bin_features, remove_redundant_features
 
 
-class PropensityEstimator(ml.Estimator):
+class PropensityEstimator():
     """
     ml.Estimator to fit and return a PropensityModel.
 
     Instance Attributes
-    ----------
-    pred_cols : List[str]
-        list of columns used as predictors
+    -------------------
     fit_data_prep_args : dict
-        args for class balance and test/train split during regression fitting
-    probability_estimator_args : dict
-        args for regressio model
-    probability_estimator : pyspark.ml.classification.LogisticRegression
+        args for class balance and test/train split during fitting
+    probability_estimator : pyspark.ml.Model = LogisticRegression
         currently only supported probability estimator
     response_col : str = 'response'
         column containing response variable
-    train_set : pyspark.sql.df
-        training set used by probability estimator. created by _split_test_train
-    test_set : pyspark.sql.df
-        test set used by probability estimator. created by _split_test_train
-    rebalanced_df : pyspark.sql.df
+    train_set : pyspark.sql.DataFrame
+        training set used by probability estimator.
+        created by _split_test_train
+    test_set : pyspark.sql.DataFrame
+        test set used by probability estimator.
+        created by _split_test_train
+    rebalanced_df : pyspark.sql.DataFrame
         dataframe with class balance given in fit_data_prep_args
 
     Class Attributes
-    ----------
+    ----------------
     default_probability_estimator_args
     default_fit_data_prep_args
 
 
     Methods
     -------
-    __init__(pred_cols: List[str],
+    __init__(
+            pred_cols: List[str],
             fit_data_prep_args: dict = default_fit_data_prep_args,
             probability_estimator_args=default_probability_estimator_args,
             probability_estimator=mlc.LogisticRegression,
@@ -60,7 +60,7 @@ class PropensityEstimator(ml.Estimator):
         "predictionCol": "prediction",
         "maxIter": 10,
         "regParam": .2,
-        "elasticNetParam": 0.5,
+        "elasticNetParam": 0,
         # tol":1e-6,
         "fitIntercept": True,
         # "threshold":0.5,
@@ -73,27 +73,89 @@ class PropensityEstimator(ml.Estimator):
         "family": "binomial"
     }
 
+
     default_fit_data_prep_args = {
         'class_balance': 1,
-        'train_prop': .8
-    }
+        'train_prop': .8,
+        'bin_features':True,
+        'remove_redundant_features':True,
+        }
 
     def __init__(self,
-                 pred_cols: List[str],
-                 fit_data_prep_args: Optional[dict] = default_fit_data_prep_args,
-                 probability_estimator_args: dict = default_probability_estimator_args,
-                 probability_estimator: Type[ml.Estimator] = mlc.LogisticRegression,
-                 response_col: str ='response',
+                 fit_data_prep_args: Optional[dict] = None,
+                 probability_estimator: Optional[Type[ml.Estimator]] = None,
+                 response_col: str ='response'
                  ):
-        self.pred_cols = pred_cols
+        r"""
+        Parameters
+        ----------
+        fit_data_prep_args: Optional[dict] = None,
+            arguments around preparing the data to be fit
+            default args are
+            default_fit_data_prep_args = {
+                'class_balance': 1,
+                'train_prop': .8,
+                'bin_features':True,
+                'remove_redundant_features':True,
+            }
+
+            'class balance' is ration of control_candidates : treatment
+            to train the model on
+
+           train_prop is the proportion of the population (post-rebalance)
+           that is in the training set
+
+           'bin_features' can be bool, dict, or absent.
+            if you do not want to bin them here, they MUST be binned
+            prior. Unbinned features will undermine validity of outcome.
+            if bin_features is absent or True, bin_features will be run
+            with default args. If it is a dict, it will be passed as
+            kwargs to bin_features. see utils.bin_features for arg details
+
+            'remove_redundant_features' can be bool, dict or absent
+            True or absent will run remove redundant features with default
+            args. Dict will passed as kwargs instead.
+            see utils.remove_redundant_features for arg details
+
+
+        probability_estimator_args: Optional[dict] = None,
+            kwargs for probability estimator. default args are
+
+            default_probability_estimator_args = {
+                "featuresCol": "features",
+                "labelCol": "label",
+                "predictionCol": "prediction",
+                "maxIter": 10,
+                "regParam": .2,
+                "elasticNetParam": 0,
+                "fitIntercept": True,
+                "probabilityCol": "probability",
+                "family": "binomial"
+            }  and may only be used with LogisticRegression or else a
+            value error will be returned. Correct labelCol and featuresCol
+            are crucial so special attention should be paid to specify them
+
+        probability_estimator: Type[ml.Estimator] = mlc.LogisticRegression
+        response_col: str ='response'
+            column in df containt the response
+
+        Raises
+        ------
+        UncaughtExceptions
+        """
+
+        if  probability_estimator is None:
+            probability_estimator = mlc.LogisticRegression(**self.default_probability_estimator_args)
+
+        if fit_data_prep_args is None:
+            fit_data_prep_args = self.default_fit_data_prep_args
+
         self.fit_data_prep_args = fit_data_prep_args
-        self.probability_estimator_args = probability_estimator_args
         self.probability_estimator = probability_estimator
-        if probability_estimator != mlc.LogisticRegression:
-            raise NotImplementedError('only pyspark.ml.classification.LogisticRegression is currently supported')
         self.response_col = response_col
 
-    def fit(self, df: pys.DataFrame) -> PropensityModel:
+
+    def fit(self, df: pys.DataFrame) -> Tuple[PropensityModel, DataFrame]:
         """
         Fit propensity model and return.
 
@@ -111,6 +173,8 @@ class PropensityEstimator(ml.Estimator):
         -------
         model: PropensityModel
             ml.Model object for propensity matching.
+        df: DataFrame
+            adjusted dataframe
 
         Raises
         ------
@@ -118,47 +182,128 @@ class PropensityEstimator(ml.Estimator):
             df too small
             too few positive samples
 
-        NotImplementedError
-            model other than LogisticRegression
 
         Uncaught Errors:
             invalid param args.
-
-        Examples
-        --------
-        model = propensity_estimator.fit(df)
-
         """
-        df.cache()
         df_count = df.count()
         assert df_count > MINIMUM_DF_COUNT, "df is too small to fit model"
-        pos_count = df.where(F.col(self.probability_estimator_args['labelCol']) == 1).count()
+
+        label_col = self.probability_estimator.getOrDefault('labelCol')
+        pos_count = df.where(F.col(label_col) == 1).count()
         assert pos_count > MINIMUM_POS_COUNT, "not enough positive samples in df to fit"
 
-        col_num = floor(pos_count * self.fit_data_prep_args['train_prop'] / SAMPLES_PER_FEATURE)
-        if col_num < len(self.pred_cols):
-            df, explained_var = reduce_dimensionality(
-                df=df,
-                pred_cols=self.pred_cols,
-                feature_col=self.probability_estimator_args['featuresCol'],
-                label_col=self.probability_estimator_args['labelCol']
-            )
+        df = self._prep_data(df)
         self.df = df
-
         self._rebalance_df()
         self._split_test_train()
-
         self._prepare_probability_model()
         model = PropensityModel(
-            prob_mod=self.probability_model,
+            prob_mod=self.prob_mod,
             df=self.df,
             train_set=self.train_set,
             test_set=self.test_set,
             response_col=self.response_col
         )
-        return model
+        return model, df
 
-    def _rebalance_df(self) -> bool:
+    def _prep_data(self,
+                   df: DataFrame):
+        r"""
+        remove highly collinear features, bin the features, and
+        reduce the dimensionality if necessary and in that order
+
+        Parameters
+        ----------
+        df : pyspark.sql.DataFrame
+            Array_like means all those objects -- lists, nested lists, etc. --
+            that can be converted to an array.  We can also refer to
+            variables like `var1`.
+        self.fit_data_prep_args : dict
+            arguments around preparing the data to be fit
+            default args are
+            default_fit_data_prep_args = {
+                'class_balance': 1,
+                'train_prop': .8,
+                'bin_features':True,
+                'remove_redundant_features':True,
+            }
+
+            'class balance' is ration of control_candidates : treatment
+            to train the model on
+
+           train_prop is the proportion of the population (post-rebalance)
+           that is in the training set
+
+           'bin_features' can be bool, dict, or absent.
+            if you do not want to bin them here, they MUST be binned
+            prior. Unbinned features will undermine validity of outcome.
+            if bin_features is absent or True, bin_features will be run
+            with default args. If it is a dict, it will be passed as
+            kwargs to bin_features. see utils.bin_features for arg details
+
+            'remove_redundant_features' can be bool, dict or absent
+            True or absent will run remove redundant features with default
+            args. Dict will passed as kwargs instead.
+            see utils.remove_redundant_features for arg details
+
+
+        Returns
+        -------
+        df : pyspark.sql.DataFrame
+            prepared dataframe
+
+
+        Raises
+        ------
+        UncaughtExceptions
+
+        See Also
+        --------
+        remove_redundant_features
+        bin_features
+        reduce_dimensionality
+        """
+
+        features_col = self.probability_estimator.getOrDefault('featuresCol')
+        label_col = self.probability_estimator.getOrDefault('labelCol')
+
+        if ('remove_redundant_features' not in  self.fit_data_prep_args) | (self.fit_data_prep_args['remove_redundant_features'] is True):
+            df, pred_cols = remove_redundant_features(df=df, features_col=features_col)
+        elif isinstance(self.fit_data_prep_args['remove_redundant_features'], dict):
+            df, pred_cols = remove_redundant_features(df=df, **self.fit_data_prep_args['remove_redundant_features'])
+        elif self.fit_data_prep_args['remove_redundant_features'] is False:
+            pass
+        else: raise ValueError('illegal argument for "remove_redundant_features" in fit_data_prep_args')
+
+        if ('bin_features' not in  self.fit_data_prep_args) | (self.fit_data_prep_args['bin_features'] is True):
+            df, pred_cols = bin_features(df=df, features_col=features_col)
+        elif isinstance(self.fit_data_prep_args['bin_features'], dict):
+            df, pred_cols = bin_features(df=df, **self.fit_data_prep_args['bin_features'])
+        elif self.fit_data_prep_args['bin_features'] is False:
+            pass
+        else: raise ValueError('illegal argument for "bin_features" in fit_data_prep_args')
+
+        # leakage note: evaluation of informativeness of predictors includes test set
+        # not ideal but minimal impact and is expedient for architecture right now.
+
+        # number of ncols depends on size of train_set so we call it here to get number as a throwaway and call it again
+        # later in _fit. opportunity for optimization #TODO
+        self.df = df
+        self._rebalance_df()
+        ncols = int((self.rebalanced_df.where(F.col(label_col)==1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
+        del self.df
+        del self.rebalanced_df
+        red_dim_args = {'df':df,
+                        'label_col': label_col,
+                        'binned_features_col': features_col,
+                        'ncols': ncols}
+        df, pred_cols = reduce_dimensionality(args=red_dim_args)
+
+        return df
+
+
+    def _rebalance_df(self,) -> bool:
         """
         Create new df with forced class balance for label to help with training.
 
@@ -171,7 +316,7 @@ class PropensityEstimator(ml.Estimator):
             where class balance is less than 1
 
         """
-        label_col = self.probability_estimator_args['labelCol']
+        label_col = self.probability_estimator.getOrDefault('labelCol')
         num_1 = self.df.where(F.col(label_col) == 1).count()
         num_0 = self.df.where(F.col(label_col) == 0).count()
 
@@ -199,9 +344,8 @@ class PropensityEstimator(ml.Estimator):
         return True
 
     def _prepare_probability_model(self):
-        """Fit probability model, embed pred cols inside."""
-        probability_model = self.probability_estimator(**self.probability_estimator_args).fit(self.train_set)
+        """Fit probability model"""
+        prob_mod = self.probability_estimator.fit(self.train_set)
         # guard against overfit happened in fit before _rebalance_df and _split_test_train were called
-        self.probability_model = probability_model
-        self.probability_model.pred_cols = self.pred_cols
+        self.prob_mod = prob_mod
         return True
