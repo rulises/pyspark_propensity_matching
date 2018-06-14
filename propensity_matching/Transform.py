@@ -191,7 +191,7 @@ def _transform(df: DataFrame,
 
 @_time_log
 def _get_metric(df: DataFrame,
-                prob_mod: Type[pyspark.ml.Model],
+                prob_mod: pyspark.ml.Model,
                 metric: str) ->Tuple[DataFrame, str]:
     r"""create the to-be-matched column
 
@@ -201,7 +201,7 @@ def _get_metric(df: DataFrame,
     df : pyspark.sql.DataFrame
         Dataframe with population in question. Must have featureCol and
         labelCol used in `prob_mod`
-    prob_mod : Type[mlc.Model]
+    prob_mod : mlc.Model
         the model predicting the probability that the row is in class 1
         in the label col.
     metric : {'probability'}
@@ -237,7 +237,7 @@ def _get_metric(df: DataFrame,
 
 @_time_log
 def _get_probability(df: DataFrame,
-                     prob_mod: Type[pyspark.ml.Model]) -> Tuple[DataFrame, str]:
+                     prob_mod: pyspark.ml.Model) -> Tuple[DataFrame, str]:
     r"""given a df w/ featureCol, binary 0,1 labelCol and a model, predict
     probability of being in class 1 & return w/ df
 
@@ -631,7 +631,6 @@ def _calc_optimal_subset(fracs: pd.DataFrame,
     -----
     """
 
-
     fracs = fracs.copy(deep=True)
     fracs['control_sample_fraction_naive'] = fracs['treatment']/fracs['control']
     scale_factor = fracs.control_sample_fraction_naive.max()**-1
@@ -654,7 +653,7 @@ def _calc_optimal_subset(fracs: pd.DataFrame,
     winning_scale = float(best_row['scale'])
     winning_drop = float(best_row['percent_dropped'])
 
-    logging.getLogger(__name__).info("max_util:{mu:.2f}\twinning_scale:{ws:.2f}\twinning_drop:{wd:.2f".format(mu=max_util, ws=winning_scale, wd=winning_drop))
+    logging.getLogger(__name__).info("max_util:{mu:.2f}\twinning_scale:{ws:.2f}\twinning_drop:{wd:.2f}".format(mu=max_util, ws=winning_scale, wd=winning_drop))
 
     fracs['control_scaled_sample_fraction'] = np.min([(fracs['treatment'] * winning_scale/fracs['control']).values, [1]*len(fracs)], axis=0)
     fracs['treatment_scaled_sample_fraction'] = fracs['control_scaled_sample_fraction'] * fracs['control']/fracs['treatment']

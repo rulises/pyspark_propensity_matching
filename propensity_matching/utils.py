@@ -30,7 +30,7 @@ def _time_log(func: Callable):
         logging.getLogger(__name__).debug("starting {name}".format(name=func.__name__))
         out = func(*args, **kwargs)
         end_time = time.time()
-        duration = end_time - start_time
+        duration = (end_time - start_time)/60
         logging.getLogger(__name__).debug("finished {name}, took {duration:,.2f} minutes".format(name=func.__name__, duration=duration))
         return out
     return _time_logger

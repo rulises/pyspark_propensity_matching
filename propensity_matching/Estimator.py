@@ -370,9 +370,7 @@ class PropensityEstimator:
     @_time_log
     def _prepare_probability_model(self):
         """Fit probability model"""
-        logging.getLogger(__name__).info("starting _prepare_probability_model")
         prob_mod = self.probability_estimator.fit(self.train_set)
-        logging.getLogger(__name__).info("finished _prepare_probability_model")
         # guard against overfit happened in fit before _rebalance_df and _split_test_train were called
         self.prob_mod = prob_mod
         return True
