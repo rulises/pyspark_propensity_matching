@@ -1,6 +1,6 @@
 """module holding PropensityEstimator (ml.Estimator)."""
-from typing import List, Optional, Type, Tuple
-from math import floor
+from typing import Optional, Tuple
+import logging
 import warnings
 
 from pyspark.sql import DataFrame
@@ -11,7 +11,7 @@ import pyspark.ml.classification as mlc
 
 from .config import MINIMUM_DF_COUNT, MINIMUM_POS_COUNT, SAMPLES_PER_FEATURE
 from .model import PropensityModel
-from .utils import reduce_dimensionality, _persist_if_unpersisted, bin_features, remove_redundant_features
+from .utils import reduce_dimensionality, _persist_if_unpersisted, bin_features, remove_redundant_features, _time_log
 
 
 class PropensityEstimator:
@@ -79,6 +79,7 @@ class PropensityEstimator:
         'remove_redundant_features': True,
         }
 
+    @_time_log
     def __init__(self,
                  fit_data_prep_args: Optional[dict] = None,
                  probability_estimator: Optional[ml.Estimator] = None,
@@ -140,6 +141,7 @@ class PropensityEstimator:
         UncaughtExceptions
         """
 
+
         if probability_estimator is None:
             probability_estimator = mlc.LogisticRegression(**self.default_probability_estimator_args)
 
@@ -150,6 +152,7 @@ class PropensityEstimator:
         self.probability_estimator = probability_estimator
         self.response_col = response_col
 
+    @_time_log
     def fit(self, df: pys.DataFrame) -> Tuple[PropensityModel, DataFrame]:
         """
         Fit propensity model and return.
@@ -182,12 +185,21 @@ class PropensityEstimator:
         Uncaught Errors:
             invalid param args.
         """
+
         df_count = df.count()
-        assert df_count > MINIMUM_DF_COUNT, "df is too small to fit model"
+        if df_count <= MINIMUM_DF_COUNT:
+            logging.getLogger(__name__).critical("df size {s:,} < {MDC:,} is too small to fit model".format(s=df_count, MDC=MINIMUM_DF_COUNT))
+            assert df_count > MINIMUM_DF_COUNT, "df is too small to fit model"
 
         label_col = self.probability_estimator.getOrDefault('labelCol')
         pos_count = df.where(F.col(label_col) == 1).count()
-        assert pos_count > MINIMUM_POS_COUNT, "not enough positive samples in df to fit"
+
+        if pos_count <= MINIMUM_POS_COUNT:
+            logging.getLogger(__name__).critical("not enough positive samples {ps:,} < {MPC:,} in df to fit".format(ps=pos_count, MPC=MINIMUM_POS_COUNT))
+            assert pos_count > MINIMUM_POS_COUNT, "not enough positive samples in df to fit"
+
+
+        logging.getLogger(__name__).info("fitting to df with total size {n} and pos size {pos_n}".format(n=df_count, pos_n=pos_count))
 
         df = self._prep_data(df)
         self.df = df
@@ -203,6 +215,7 @@ class PropensityEstimator:
         )
         return model, df
 
+    @_time_log
     def _prep_data(self,
                    df: DataFrame):
         r"""
@@ -265,26 +278,35 @@ class PropensityEstimator:
         label_col = self.probability_estimator.getOrDefault('labelCol')
 
         if ('remove_redundant_features' not in self.fit_data_prep_args) | (self.fit_data_prep_args['remove_redundant_features'] is True):
+            logging.getLogger(__name__).info("removing redundant features with default args")
             df, pred_cols = remove_redundant_features(df=df, features_col=features_col)
         elif isinstance(self.fit_data_prep_args['remove_redundant_features'], dict):
+            logging.getLogger(__name__).info("removing redundant features with specified args")
             df, pred_cols = remove_redundant_features(df=df, **self.fit_data_prep_args['remove_redundant_features'])
         elif self.fit_data_prep_args['remove_redundant_features'] is False:
-            pass
-        else: raise ValueError('illegal argument for "remove_redundant_features" in fit_data_prep_args')
+            logging.getLogger(__name__).info("not removing redundant features")
+        else:
+            logging.getLogger(__name__).critical("illegal arg for remove_redundant_features")
+            raise ValueError('illegal argument for "remove_redundant_features" in fit_data_prep_args')
 
         if ('bin_features' not in self.fit_data_prep_args) | (self.fit_data_prep_args['bin_features'] is True):
+            logging.getLogger(__name__).info("binning features with default args")
             df, pred_cols = bin_features(df=df, features_col=features_col)
         elif isinstance(self.fit_data_prep_args['bin_features'], dict):
+            logging.getLogger(__name__).info("binning features with specified args")
             df, pred_cols = bin_features(df=df, **self.fit_data_prep_args['bin_features'])
         elif self.fit_data_prep_args['bin_features'] is False:
-            pass
-        else: raise ValueError('illegal argument for "bin_features" in fit_data_prep_args')
+            logging.getLogger(__name__).info("not binning features")
+        else:
+            logging.getLogger(__name__).critical("illegal arg for bin_features")
+            raise ValueError('illegal argument for "bin_features" in fit_data_prep_args')
 
         # leakage note: evaluation of informativeness of predictors includes test set
         # not ideal but minimal impact and is expedient for architecture right now.
 
         # number of ncols depends on size of train_set so we call it here to get number as a throwaway and call it again
         # later in _fit. opportunity for optimization #TODO
+        logging.getLogger(__name__).info("one-off rebalance of df to get train set count")
         self.df = df
         self._rebalance_df()
         ncols = int((self.rebalanced_df.where(F.col(label_col)==1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
@@ -294,10 +316,12 @@ class PropensityEstimator:
                         'label_col': label_col,
                         'binned_features_col': features_col,
                         'ncols': ncols}
+        logging.getLogger(__name__).info("reducing dimensionality of df")
         df, pred_cols = reduce_dimensionality(args=red_dim_args)
 
         return df
 
+    @_time_log
     def _rebalance_df(self,) -> bool:
         """
         Create new df with forced class balance for label to help with training.
@@ -315,14 +339,16 @@ class PropensityEstimator:
         num_1 = self.df.where(F.col(label_col) == 1).count()
         num_0 = self.df.where(F.col(label_col) == 0).count()
 
+        logging.getLogger(__name__).info("rebalancing df to {class_balance} with pos count {n_pos} and neg count {n_neg}".format(n_pos=num_1, n_neg=num_0, class_balance=self.fit_data_prep_args['class_balance']))
+
         if num_1 > num_0:
-            raise NotImplementedError("class rebalanced not implemented for class 1 > class 0")
+            raise NotImplementedError("class rebalance not implemented for class 1 > class 0")
 
         # should have already failed out in fit if num_1 would have returned 0
         max_ratio = num_0 / num_1
         # if desired class ratio is impossible, take max possible ratio, reassign class balance and warn
         if self.fit_data_prep_args['class_balance'] > max_ratio:
-            warnings.warn("Maximum class balance is {max_ratio} but requested is {class_balance} \
+            logging.getLogger(__name__).warning("Maximum class balance is {max_ratio} but requested is {class_balance} \
             Changing to {max_ratio}".format(max_ratio=max_ratio, class_balance=self.fit_data_prep_args['class_balance']))
             self.fit_data_prep_args['class_balance'] = max_ratio
 
@@ -331,16 +357,22 @@ class PropensityEstimator:
         rebalanced_df_0 = self.df.where(F.col(label_col) == 0).sample(withReplacement=False, fraction=float(sample_frac_0), seed=42)
         rebalanced_df = rebalanced_df_0.select(self.df.columns).union(self.df.where(F.col(label_col) == 1).select(self.df.columns))
         self.rebalanced_df = rebalanced_df
+        logging.getLogger(__name__).info("rebalanced df into size {n}".format(n=rebalanced_df.count()))
+
         return True
 
+    @_time_log
     def _split_test_train(self) -> bool:
         """Create test, train set attributes based on fit_data_prep_args."""
         self.train_set, self.test_set = self.rebalanced_df.randomSplit([self.fit_data_prep_args['train_prop'], 1 - self.fit_data_prep_args['train_prop']])
         return True
 
+    @_time_log
     def _prepare_probability_model(self):
         """Fit probability model"""
+        logging.getLogger(__name__).info("starting _prepare_probability_model")
         prob_mod = self.probability_estimator.fit(self.train_set)
+        logging.getLogger(__name__).info("finished _prepare_probability_model")
         # guard against overfit happened in fit before _rebalance_df and _split_test_train were called
         self.prob_mod = prob_mod
         return True

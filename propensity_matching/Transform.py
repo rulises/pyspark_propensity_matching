@@ -1,5 +1,6 @@
 import math
 from typing import Tuple, Type, Optional, Union
+import logging
 
 import numpy as np
 import pandas as pd
@@ -15,11 +16,12 @@ import pyspark.ml.classification as mlc
 
 
 
-from .utils import _persist_if_unpersisted
+from .utils import _persist_if_unpersisted, _time_log
 from .config import UTIL_BOOST_THRESH_1, UTIL_BOOST_THRESH_2, UTIL_BOOST_THRESH_3,\
                     SMALL_MATCH_THRESHOLD, MINIMUM_POS_COUNT
 
 
+@_time_log
 def transform(df: DataFrame,
               prob_mod: Type[mlc.Model],
               method: Optional[str] = None,
@@ -82,6 +84,7 @@ def transform(df: DataFrame,
     return df, match_info
 
 
+@_time_log
 def _transform(df: DataFrame,
                prob_mod: Type[mlc.Model],
                method: Optional[str],
@@ -149,9 +152,13 @@ def _transform(df: DataFrame,
     if match_kwargs is None:
         match_kwargs = {}
 
+    logging.getLogger(__name__).info("method is {method}".format(method=str(method)))
+
     if method is None:
         method = 'auto'
+        logging.getLogger(__name__).info("assigning default arg 'auto'")
     elif method not in ['assignment', 'quantile', 'auto']:
+        logging.getLogger(__name__).critical("invalid method argument")
         raise NotImplementedError("method {method} not implemented".format(method=method))
     if method == 'auto':
         label_col = prob_mod.getOrDefault('labelCol')
@@ -161,21 +168,28 @@ def _transform(df: DataFrame,
         neg_count = df.where(F.col(label_col)==0).count()
         if (pos_count*neg_count) <= SMALL_MATCH_THRESHOLD:
             method = 'assignment'
+            logging.getLogger(__name__).info("auto method is assignment")
         else:
             method = 'quantile'
+            logging.getLogger(__name__).info("auto method is quantile")
 
+    logging.getLogger(__name__).info("metris is {metric}".format(metric=str(metric)))
     if metric is None:
         metric = 'probability'
+        logging.getLogger(__name__).info("assigning default metric 'probability'")
     elif metric not in ['probability']:
+        logging.getLogger(__name__).critical("invalid metric argument")
         raise NotImplementedError("metric {metric} not implemented".format(metric=metric))
 
     # step 1 calculate match metric
     df, metric_col = _get_metric(df, prob_mod, metric)
     # step 2 match
     df, match_info = _match(df, prob_mod, method, metric_col, match_kwargs)
+
     return df, match_info
 
 
+@_time_log
 def _get_metric(df: DataFrame,
                 prob_mod: Type[pyspark.ml.Model],
                 metric: str) ->Tuple[DataFrame, str]:
@@ -221,6 +235,7 @@ def _get_metric(df: DataFrame,
     return df, metric_col
 
 
+@_time_log
 def _get_probability(df: DataFrame,
                      prob_mod: Type[pyspark.ml.Model]) -> Tuple[DataFrame, str]:
     r"""given a df w/ featureCol, binary 0,1 labelCol and a model, predict
@@ -259,6 +274,7 @@ def _get_probability(df: DataFrame,
     return scored_df, prob_1_col
 
 
+@_time_log
 def _match(df: DataFrame,
            prob_mod: Type[mlc.Model],
            method: str,
@@ -318,9 +334,11 @@ def _match(df: DataFrame,
         }
     # _assignment_match doesnt currently have any kwargs, so match_kwargs should be empty
     df, match_info = functions_dict[method](df, prob_mod, metric_col, **match_kwargs)
+
     return df, match_info
 
 
+@_time_log
 def _quantile_match(df: DataFrame,
                     prob_mod: Type[mlc.Model],
                     metric_col: str,
@@ -383,14 +401,18 @@ def _quantile_match(df: DataFrame,
     -----
 
     """
+    logging.getLogger(__name__).info("starting _quantile_match with args ntile={ntile}, quantile_error_scale={qes}, /"
+                                     "sample_num={sn}".format(ntile=ntile, qes=quantile_error_scale, sn=sample_num))
 
     label_col = prob_mod.getOrDefault('labelCol')
     df, match_col = _make_quantile_match_col(df, metric_col, label_col, ntile, quantile_error_scale, sample_num)
     df, match_info = _execute_quantile_match(df, match_col, label_col)
     match_info['type'] = 'quantile'
+
     return df, match_info
 
 
+@_time_log
 def _make_quantile_match_col(df: DataFrame,
                              metric_col: str,
                              label_col: str,
@@ -463,9 +485,11 @@ def _make_quantile_match_col(df: DataFrame,
     _persist_if_unpersisted(df)
     match_col = "quantile_match_col_{metric_col}".format(metric_col=metric_col)
     df = df.withColumn(match_col, make_udf(threshs)(F.col(metric_col)) + 1)
+
     return df, match_col
 
 
+@_time_log
 def _execute_quantile_match(df: DataFrame,
                             match_col: str,
                             label_col: str) ->Tuple[DataFrame, dict]:
@@ -498,6 +522,7 @@ def _execute_quantile_match(df: DataFrame,
     -----
 
     """
+
     t_df = df.where(F.col(label_col) == 1)
     c_can_df = df.where(F.col(label_col) == 0)
 
@@ -505,9 +530,11 @@ def _execute_quantile_match(df: DataFrame,
     t_out, c_out = _sample_dfs(t_df, t_fracs, c_can_df, c_fracs, match_col)
     df = t_out.union(c_out.select(t_out.columns))
     match_info = {'scaled': scaled, 'dropped': dropped}
+
     return df, match_info
 
 
+@_time_log
 def _calc_sample_fracs(t_df: DataFrame,
                        c_can_df: DataFrame,
                        match_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, float, float]:
@@ -562,11 +589,15 @@ def _calc_sample_fracs(t_df: DataFrame,
     fracs = t_counts.join(c_can_counts, on=[match_col])
     fracs = fracs.toPandas()
     sample_fracs, scale, drop = _calc_optimal_subset(fracs=fracs, match_col=match_col)
+    logging.getLogger(__name__).info("scale = {scale:.2f}     drop: = {drop:.2f}".format(scale=scale, drop=drop))
+
+
     return sample_fracs[[match_col, 'treatment_scaled_sample_fraction']],\
            sample_fracs[[match_col, 'control_scaled_sample_fraction']],\
            scale, drop
 
 
+@_time_log
 def _calc_optimal_subset(fracs: pd.DataFrame,
                          match_col: str) -> Tuple[pd.DataFrame, float, float]:
     r""" return best sample fractions for given population
@@ -600,12 +631,15 @@ def _calc_optimal_subset(fracs: pd.DataFrame,
     -----
     """
 
+
     fracs = fracs.copy(deep=True)
     fracs['control_sample_fraction_naive'] = fracs['treatment']/fracs['control']
     scale_factor = fracs.control_sample_fraction_naive.max()**-1
+    logging.getLogger(__name__).info("scale factor  is {scale_factor:.2f} (coeffs for treatment w/ no drops".format(scale_factor=scale_factor))
 
     # if no subscaling is necessary return fracs as is
     if scale_factor >= 1:
+        logging.getLogger(__name__).info("can use all treatments safely, returning early")
         fracs['control_scaled_sample_fraction'] = fracs['control_sample_fraction_naive']
         fracs['treatment_scaled_sample_fraction'] = 1
         fracs = fracs[[match_col, 'treatment_scaled_sample_fraction', 'control_scaled_sample_fraction']]
@@ -620,14 +654,16 @@ def _calc_optimal_subset(fracs: pd.DataFrame,
     winning_scale = float(best_row['scale'])
     winning_drop = float(best_row['percent_dropped'])
 
+    logging.getLogger(__name__).info("max_util:{mu:.2f}\twinning_scale:{ws:.2f}\twinning_drop:{wd:.2f".format(mu=max_util, ws=winning_scale, wd=winning_drop))
+
     fracs['control_scaled_sample_fraction'] = np.min([(fracs['treatment'] * winning_scale/fracs['control']).values, [1]*len(fracs)], axis=0)
     fracs['treatment_scaled_sample_fraction'] = fracs['control_scaled_sample_fraction'] * fracs['control']/fracs['treatment']
     fracs = fracs[[match_col, 'treatment_scaled_sample_fraction', 'control_scaled_sample_fraction']]
 
-    # return fracs
     return fracs, winning_scale, winning_drop
 
 
+@_time_log
 def _create_options_grid(fracs: pd.DataFrame, scale_factor: float) -> pd.DataFrame:
     r"""create 100 scale options & calc drop
 
@@ -656,7 +692,6 @@ def _create_options_grid(fracs: pd.DataFrame, scale_factor: float) -> pd.DataFra
     UncaughtExceptions
 
     """
-
     fracs = fracs.copy(deep=True)
     scales = np.linspace(1, scale_factor, num=100, endpoint=True)
     options = pd.DataFrame(columns=['scale', 'percent_dropped', 'number'])
@@ -704,6 +739,7 @@ def _logistic_function(x, L, k=1, x0=0):
             return 0
 
 
+@_time_log
 def _sample_dfs(t_df: pyspark.sql.DataFrame,
                 t_fracs: pd.DataFrame,
                 c_can_df: pyspark.sql.DataFrame,
@@ -747,9 +783,11 @@ def _sample_dfs(t_df: pyspark.sql.DataFrame,
     for key, value in c_fracs.items():
         c_dict[int(key)] = float(value)
     c_out = c_can_df.sampleBy(col=match_col, fractions=c_dict, seed=42)
+
     return t_out, c_out
 
 
+@_time_log
 def _assignment_match(df: DataFrame,
                       prob_mod: Type[mlc.Model],
                       metric_col: str) ->Tuple[DataFrame, dict]:
@@ -817,6 +855,7 @@ def _assignment_match(df: DataFrame,
     before it is considered canon.
 
     """
+
     label_col = prob_mod.getOrDefault('labelCol')
     t_df = df.where(F.col(label_col)==1)
     c_can_df = df.where(F.col(label_col)==0)
@@ -833,11 +872,13 @@ def _assignment_match(df: DataFrame,
     match_info['average_cost'] = average_cost
     df = _get_assigned_rows(t_ind=t_ind, t_df=t_adjusted_df, c_ind=c_ind, c_can_df=c_can_adjusted_df)
 
+    logging.getLogger(__name__).info("matched df size is {n:,}".format(n=df.count()))
     match_info['dropped'] = 0
 
     return df, match_info
 
 
+@_time_log
 def _adjust_balance(t_df: DataFrame,
                     c_can_df: DataFrame,
                     metric_col: str) -> Tuple[pyspark.sql.DataFrame, pyspark.sql.DataFrame, dict]:
@@ -914,15 +955,24 @@ def _adjust_balance(t_df: DataFrame,
     t_count = t_df.count()
     c_can_count = c_can_df.count()
 
+    logging.getLogger(__name__).info("t_mean={tm:.2f}   c_can_mean={ccm:.2f}   mean_ratio={mr:.2f}   t_count={tc:.2f}   c_can_count={ccc:.2f}".format(
+            tm=t_mean, ccm=c_can_mean, mr=mean_ratio, tc=t_count, ccc=c_can_count)
+            )
+
     desired_t_count = c_can_count/mean_ratio
     if t_count > desired_t_count:
+        logging.getLogger(__name__).info("adjustment of treatment necessary")
         frac = desired_t_count/t_count
         t_adjusted_df = t_df.sample(fraction=frac, withReplacement=False, seed=42)
         t_adj_count = t_adjusted_df.count()
         scaled = t_adj_count/t_count
+        logging.getLogger(__name__).info("scaled: {s:.2f}   adjusted treatment count {tac:,}".format(s=scaled, tac=t_adj_count))
+
         if t_adj_count < MINIMUM_POS_COUNT:
+            logging.getLogger(__name__).critical("treatment count {tac:,} less than MINIMUM_POS_COUNT {MPC:,}".format(tac=t_adj_count, MPC=MINIMUM_POS_COUNT))
             raise ValueError('population is too unbalanced to match')
     else:
+        logging.getLogger(__name__).info("adjustment of treatment NOT necessary")
         t_adjusted_df = t_df
         scaled = 1
     t_adjusted_count = t_adjusted_df.count()
@@ -935,11 +985,13 @@ def _adjust_balance(t_df: DataFrame,
         'adj_t_count': t_adjusted_count
     }
     if t_adjusted_count > c_can_count:
+        logging.getLogger(__name__).critical("more treatments thatn controls, this shouldnt have happened")
         raise ValueError("more treatments that controls")
 
     return t_adjusted_df, c_can_df, match_info
 
 
+@_time_log
 def _make_cost_matrix(t_vals: pd.Series,
                       c_can_vals: pd.Series) -> np.matrix:
     r"""given a series of values for treatment and control candidate
@@ -971,6 +1023,7 @@ def _make_cost_matrix(t_vals: pd.Series,
     _execute_assignment_match
     _get_assigned_rows
     """
+
     t_vals_matrix = np.matrix(np.repeat(a=np.array([t_vals.values, ]), repeats=len(c_can_vals), axis=0))
     c_can_vals_matrix = np.matrix(np.repeat(a=np.array([c_can_vals.values, ]), repeats=len(t_vals), axis=0)).transpose()
 
@@ -979,6 +1032,7 @@ def _make_cost_matrix(t_vals: pd.Series,
     return cost_matrix
 
 
+@_time_log
 def _execute_assignment_match(cost_matrix: np.matrix)->Tuple[np.ndarray, np.ndarray, float, float]:
     r"""given a cost matrix, use the hungarian algorithm to find the best
     solution to the assignmetn problem
@@ -1017,9 +1071,13 @@ def _execute_assignment_match(cost_matrix: np.matrix)->Tuple[np.ndarray, np.ndar
     c_ind, t_ind = linear_sum_assignment(cost_matrix)
     total_cost = float(cost_matrix[c_ind, t_ind].sum())
     average_cost = float(total_cost/len(t_ind))
+
+    logging.getLogger(__name__).info("chose {tnum:,} treatments and {cnum:,} controls".format(tnum=len(t_ind), cnum=len(c_ind)))
+    logging.getLogger(__name__).info("total_cost:{tc:,.2f}   average_cost:{ac:.2f}".format(tc=total_cost, ac=average_cost))
+
     return c_ind, t_ind, total_cost, average_cost
 
-
+@_time_log
 def _get_assigned_rows(t_ind: np.ndarray,
                        t_df: DataFrame,
                        c_ind: np.ndarray,

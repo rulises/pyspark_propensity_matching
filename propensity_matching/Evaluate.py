@@ -1,5 +1,5 @@
 import warnings
-
+import logging
 from collections import namedtuple
 from typing import Type, Optional, Tuple, Dict
 
@@ -14,7 +14,7 @@ from pyspark.ml import evaluation as mle
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
 
-from .utils import _persist_if_unpersisted, _get_pred_cols
+from .utils import _persist_if_unpersisted, _get_pred_cols, _time_log
 
 # container for model performance
 propensity_model_performance_summary = namedtuple('propensity_model_performance_summary', [
@@ -39,6 +39,7 @@ performance_summary = namedtuple('performance_summary', [
     ])
 
 
+@_time_log
 def evaluate(prob_mod: Type[pyspark.ml.Model],
              pre_df: Optional[DataFrame] = None,
              post_df: Optional[DataFrame] = None,
@@ -131,6 +132,7 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
     elif transform_df is not None:
         pred_col_df = transform_df
     else:
+        logging.getLogger(__name__).critical("all model metric dfs are None")
         raise ValueError("All model metric dfs are None")
 
     pred_cols = _get_pred_cols(df=pred_col_df, features_col=features_col)
@@ -140,6 +142,7 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
         bias_df, total_bias_reduced, starting_bias_mean, starting_bias_var \
             = _eval_match_performance(pre_df.select(cols), post_df.select(cols), label_col)
     except AssertionError as e:
+        logging.getLogger(__name__).warning("eval_match_performance failed with warning {e}".format(e=str(e)))
         warnings.warn(e)
         bias_df = None
         total_bias_reduced = None
@@ -158,6 +161,7 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
     return perf_sum
 
 
+@_time_log
 def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
                            test_df: Optional[DataFrame],
                            train_df: Optional[DataFrame],
@@ -218,22 +222,29 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
     """
     if train_df is None:
         train_prob_mod_perf = None
+        logging.getLogger(__name__).info("train_df is None")
     else:
         train_prob_mod_perf = _eval_df_model(df=train_df, prob_mod=prob_mod)
+        logging.getLogger(__name__).info("train_prob_mod_perf: {perf}".format(perf=str(train_prob_mod_perf)))
 
     if test_df is None:
         test_prob_mod_perf = None
+        logging.getLogger(__name__).info("test_df is None")
     else:
         test_prob_mod_perf = _eval_df_model(df=test_df, prob_mod=prob_mod)
+        logging.getLogger(__name__).info("test_prob_mod_perf: {perf}".format(perf=str(test_prob_mod_perf)))
 
     if transform_df is None:
         transform_prob_mod_perf = None
+        logging.getLogger(__name__).info("transform_df is None")
     else:
         transform_prob_mod_perf = _eval_df_model(df=transform_df, prob_mod=prob_mod)
+        logging.getLogger(__name__).info("transform_prob_mod_perf: {perf}".format(perf=str(transform_prob_mod_perf)))
 
     return test_prob_mod_perf, train_prob_mod_perf, transform_prob_mod_perf
 
 
+@_time_log
 def _eval_df_model(df: DataFrame,
                    prob_mod: Type[pyspark.ml.Model],
                    sample_num: Optional[int] = 10 ** 6) -> propensity_model_performance_summary:
@@ -314,6 +325,7 @@ def _eval_df_model(df: DataFrame,
     return prob_mod_per_sum
 
 
+@_time_log
 def _calc_auc_auprc(df: DataFrame,
                     prob_col: str,
                     label_col: str) -> Tuple[float, float]:
@@ -353,7 +365,7 @@ def _calc_auc_auprc(df: DataFrame,
 
     return auc, auprc
 
-
+@_time_log
 def _calc_model_metrics(df: DataFrame,
                         prob_col: str,
                         label_col: str) -> Dict[str, float]:
@@ -408,7 +420,7 @@ def _calc_model_metrics(df: DataFrame,
 
     return max_metrics
 
-
+@_time_log
 def _eval_match_performance(pre_df: DataFrame,
                             post_df: DataFrame,
                             label_col) -> Tuple[pd.DataFrame, float, float, float]:
@@ -465,17 +477,24 @@ def _eval_match_performance(pre_df: DataFrame,
     _calc_bias
     _calc_var
     """
-    assert pre_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in pre_df'
-    assert post_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in post_df'
+    if pre_df.where(F.col(label_col) == 1).count() <= 0:
+        logging.getLogger(__name__).critical("somehow dont have positive samples in pre_df, this shouldnt happen")
+        assert pre_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in pre_df'
+
+    if post_df.where(F.col(label_col) == 1).count() <= 0:
+        logging.getLogger(__name__).critical("somehow dont have positive samples in post_df, this shouldnt happen")
+        assert post_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in post_df'
 
     stan_bias_red_df, total_bias_reduced = _calc_standard_bias_reduced(pre_df, post_df, label_col)
+    logging.getLogger(__name__).info("total bias reduced: {tbr:.2f}".format(tbr=total_bias_reduced))
 
     bias_red_df, starting_bias_mean, starting_bias_var = _calc_bias_reduced(pre_df, post_df, label_col)
     bias_df = bias_red_df.join(stan_bias_red_df, how='outer')
+    logging.getLogger(__name__).info("starting mean: {sbm:,.2f}   starting var: {sbv:,.2f}".format(sbm=starting_bias_mean, sbv=starting_bias_var))
 
     return bias_df, total_bias_reduced, starting_bias_mean, starting_bias_var
 
-
+@_time_log
 def _calc_bias(df: DataFrame,
                label_col: str) -> pd.DataFrame:
     r""" given labels and features, calculate bias for each feature
@@ -510,7 +529,7 @@ def _calc_bias(df: DataFrame,
     bias_df = bias_df.loc[bias_df.index != 'label', :]
     return bias_df
 
-
+@_time_log
 def _calc_standard_bias(df: DataFrame,
                         label_col: str) -> pd.DataFrame:
     r"""given labels and features, calculate standard bias for each feature
@@ -552,7 +571,7 @@ def _calc_standard_bias(df: DataFrame,
     bias_red_df = bias_red_df[['standard_bias']]
     return bias_red_df
 
-
+@_time_log
 def _calc_var(df: pyspark.sql.DataFrame,
               label_col: str) -> pd.DataFrame:
     r"""calculate variance for each column that isnt the label_col
@@ -588,7 +607,7 @@ def _calc_var(df: pyspark.sql.DataFrame,
     s_var_df = s_var_df.loc[s_var_df.index != 'label', :]
     return s_var_df
 
-
+@_time_log
 def _calc_bias_reduced(pre_df: DataFrame,
                        post_df: DataFrame,
                        label_col: str) -> Tuple[pd.DataFrame, float, float]:
@@ -643,7 +662,7 @@ def _calc_bias_reduced(pre_df: DataFrame,
 
     return b_red_df, starting_bias_mean, starting_bias_var
 
-
+@_time_log
 def _calc_standard_bias_reduced(pre_df: DataFrame,
                                 post_df: DataFrame,
                                 label_col: str) -> Tuple[pd.DataFrame, float]:

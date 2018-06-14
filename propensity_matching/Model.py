@@ -1,6 +1,7 @@
 """Defines PropensityModel"""
 from typing import Tuple
 from collections import namedtuple
+import logging
 
 from pyspark.sql import DataFrame
 import pyspark.ml as ml
@@ -9,7 +10,7 @@ import pyspark.ml as ml
 from .evaluate import evaluate as _evaluate
 from .impact import impact as _impact
 from .transform import transform as _transform
-
+from .utils import _time_log
 
 class PropensityModel():
     r"""The entry point for transform, impact, and evaluate workflows.
@@ -38,6 +39,8 @@ class PropensityModel():
     evaluate_performance(pre_df, post_df, transform_df, by_col_group)
         Change the photo's gamma exposure.
     """
+
+    @_time_log
     def __init__(self,
                  prob_mod,
                  df,
@@ -52,6 +55,7 @@ class PropensityModel():
         self.test_set = test_set
         self.response_col = response_col
 
+    @_time_log
     def transform(self,
                   df: DataFrame) ->Tuple[DataFrame, dict]:
         r"""A one-line summary that does not use variable names or the
@@ -82,6 +86,7 @@ class PropensityModel():
         df, match_info= _transform(df, self.prob_mod)
         return df, match_info
 
+    @_time_log
     def determine_impact(self,
                          df: DataFrame)-> Tuple[float, float, float]:
         r"""Calculates effect of label col on response col, controlling
@@ -111,12 +116,12 @@ class PropensityModel():
         Examples
         --------
         """
-
         treatment_rate, control_rate, adjusted_response = _impact(df=df,
                                                                   response_col=self.response_col,
                                                                   prob_mod=self.prob_mod)
         return treatment_rate, control_rate, adjusted_response
 
+    @_time_log
     def evaluate_performance(self,
                              pre_df,
                              post_df,

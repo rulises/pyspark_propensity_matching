@@ -1,5 +1,5 @@
 import math
-
+import logging
 from typing import Tuple, Type
 
 import pyspark
@@ -7,9 +7,10 @@ import pyspark.ml.feature as mlf
 import pyspark.ml.classification as mlc
 
 from .config import NAIVE_THRESHOLD_COUNT, SAMPLES_PER_FEATURE, MINIMUM_POS_COUNT
-from .utils import reduce_dimensionality, bin_features, _persist_if_unpersisted, _get_pred_cols
+from .utils import reduce_dimensionality, bin_features, _persist_if_unpersisted, _get_pred_cols, _time_log
 
 
+@_time_log
 def impact(df: pyspark.sql.DataFrame,
            response_col: str,
            prob_mod: Type[mlc.Model]
@@ -70,6 +71,7 @@ def impact(df: pyspark.sql.DataFrame,
 
     # safety check
     if all_count < MINIMUM_POS_COUNT * 2:
+        logging.getLogger(__name__).critical("somehow have less than 2*MINIMUM_POS_COUNT*2 rows")
         raise ValueError("Have less than MINIMUM_POS_COUNT*2 rows, this shouldnt be happening")
 
     # dict because 1, 0 for label col are not guaranteed to be ordered
@@ -78,14 +80,19 @@ def impact(df: pyspark.sql.DataFrame,
     naive_response_dict[response_list[0][label_col]] = response_list[0]["avg({col})".format(col=response_col)]
     naive_response_dict[response_list[1][label_col]] = response_list[1]["avg({col})".format(col=response_col)]
     treatment_rate, control_rate = naive_response_dict[1], naive_response_dict[0]
+    logging.getLogger(__name__).info("treatment_rate:{tr:.2f}   control_rate:{cr:.2f}".format(tr=treatment_rate, cr=control_rate))
 
     # return early if additional bias reduction is not applicable
     if all_count < NAIVE_THRESHOLD_COUNT:
+        logging.getLogger(__name__).info("additional bias adjustment inapplicable, returning naive difference")
         return treatment_rate, control_rate, (control_rate-treatment_rate)
 
+    logging.getLogger(__name__).info("additional bias adjustment necessary")
     # choose fewer features if appropriate to prevent overfit. round down
     num_preds = math.floor(df.count()/SAMPLES_PER_FEATURE) - 1
+    logging.getLogger(__name__).info("need max {n:,} predictors".format(n=num_preds))
     if num_preds < len(list(pred_cols)):
+        logging.getLogger(__name__).info("desired predictors {np:,} is less than existing {ep:,}, reducing dimensionality".format(np=num_preds, ep=len(pred_cols)))
         kwargs = {
             'df': df,
             'label_col': label_col,
@@ -107,4 +114,5 @@ def impact(df: pyspark.sql.DataFrame,
     coeff_dict = dict(zip(pred_cols_r, lrm_r.coefficients))
 
     adjusted_response = control_rate * (1 - math.exp(coeff_dict[label_col]))
+    logging.getLogger(__name__).info("bias asjusted response is {ar:.2f}".format(ar=adjusted_response))
     return treatment_rate, control_rate, adjusted_response
