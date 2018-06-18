@@ -12,6 +12,7 @@ from .impact import impact as _impact
 from .transform import transform as _transform
 from .utils import _time_log
 
+
 class PropensityModel():
     r"""The entry point for transform, impact, and evaluate workflows.
 

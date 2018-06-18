@@ -31,7 +31,8 @@ def _time_log(func: Callable):
         out = func(*args, **kwargs)
         end_time = time.time()
         duration = (end_time - start_time)/60
-        logging.getLogger(__name__).debug("finished {name}, took {duration:,.2f} minutes".format(name=func.__name__, duration=duration))
+        logging.getLogger(__name__).debug("finished {name}, took {duration:,.2f} minutes".format(name=func.__name__,
+                                                                                                 duration=duration))
         return out
     return _time_logger
 
@@ -123,7 +124,6 @@ def remove_redundant_features(df: DataFrame,
     Parameters
     ----------
     df : pyspark.sql.DataFrame
-        The dataframe in question. Must contain all cols in pred_cols
     pred_cols : List[str]
         List of columns that may be predictors. Must be numeric.
     features_col : str
