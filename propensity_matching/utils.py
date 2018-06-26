@@ -99,16 +99,34 @@ def _persist_if_unpersisted(df: DataFrame) -> bool:
 
     if _compare_stor_levels(df.storageLevel, StorageLevel(False, False, False, False, 1)):
         logging.getLogger(__name__).info("df was unpersisted, persisting")
-        df.persist(StorageLevel(False, True, False, False))
+        df.cache()
         return True
 
     logging.getLogger(__name__).info("df was already persisted")
     return False
 
 @_time_log
+def _sample_df(df: DataFrame,
+               sample_size: Optional[int]= None):
+    _persist_if_unpersisted(df)
+    all_count = df.count()
+    if (sample_size is None) | (all_count <= sample_size):
+        if isinstance(sample_size, int):
+            logging.getLogger(__name__).info("no sampling necessary {c:,} <= {sn:,}".format(c=all_count, sn=sample_size))
+        else:
+            logging.getLogger(__name__).info("requested not to sample, df of size {c:,}".format(c=all_count))
+        sample_df = df
+    else:  # all_count > sample_size:
+        frac = sample_size / all_count
+        logging.getLogger(__name__).info("sampling {c:,} by {f:.2f} to {sn:,}".format(c=all_count, f=frac, sn=sample_size))
+        sample_df = df.sample(withReplacement=False, fraction=frac, seed=42)
+    return sample_df
+
+
+@_time_log
 def remove_redundant_features(df: DataFrame,
                               features_col: str,
-                              sample_num: int = 10 ** 5,
+                              sample_size: int = 10 ** 5,
                               method: str = 'ward',
                               cluster_thresh: float = .1,
                               ) -> Tuple[DataFrame, List[str]]:
@@ -129,7 +147,7 @@ def remove_redundant_features(df: DataFrame,
     features_col : str
         Name of column that will be the feature column.
         May already exist in df, in which case it will be dropped
-    sample_num : int=10**5, optional
+    sample_size : int=10**5, optional
         size of sample df used to evaluate columns
     method : {'ward', 'single', 'average', 'weighted', median'} , optional
         see scipy.cluster.hierarchy.linkage for more
@@ -153,21 +171,15 @@ def remove_redundant_features(df: DataFrame,
     scipy.cluster.hierarchy : package with core functionality
     """
 
-    # sample dataframe of max size sample_num
-    logging.getLogger(__name__).info("removing redundant features with params sample_num={sn:,}   method={m}   "
-                                     "cluster_thresh={ct:.2f}".format(sn=sample_num, m=method, ct=cluster_thresh))
+    # sample dataframe of max size sample_size
+    logging.getLogger(__name__).info("removing redundant features with params sample_size={sn:,}   method={m}   "
+                                     "cluster_thresh={ct:.2f}".format(sn=sample_size, m=method, ct=cluster_thresh))
 
     pred_cols = _get_pred_cols(df=df, features_col=features_col)
 
-    count = df.count()
-    if count <= sample_num:
-        logging.getLogger(__name__).info("no sampling necessary {c:,} <= {sn:,}".format(c=count, sn=sample_num))
-        sample_df = df
-    else:
-        frac = sample_num / count
-        logging.getLogger(__name__).info("sampling {c:,} by {f:.2f} to {sn:,}".format(c=count, f=frac, sn=sample_num))
-        sample_df = df.sample(withReplacement=False, fraction=frac, seed=42)
-    sample_df.persist(StorageLevel(False, True, False, False, 1))
+
+    sample_df = _sample_df(df=df, sample_size=sample_size)
+    _persist_if_unpersisted(sample_df)
 
     # create dict of col:variance
     variances_frame = sample_df.select([F.variance(F.col(x)).alias(x) for x in pred_cols])
@@ -229,8 +241,8 @@ def remove_redundant_features(df: DataFrame,
 def bin_features(df: DataFrame,
                  features_col: str,
                  ntiles: Union[Dict[str, int], int] = 5,
-                 error_scale: Union[int, float] = 10,
-                 sample_num: Optional[int] = 10 ** 5) \
+                 error_scale: Union[int, float] = 5,
+                 sample_size: Optional[int] = 10 ** 4) \
         -> Tuple[DataFrame, List[str]]:
     r"""
     use quantiles to bin numeric features into interval/ordinal
@@ -262,10 +274,10 @@ def bin_features(df: DataFrame,
     error_scale: Union[float, int], Optional:
         1/ntile/error_scale is the errorTolerance passed to
         approxQuantile when calculating quantile bin thresholds.
-        Default value is 10
-    sample_num: int, Optional
+        Default value is 5
+    sample_size: int, Optional
         number of rows to consider when subsampling to calculate quantiles.
-        max of 100,000 by default
+        max of 10,000 by default
         if None whole dataframe will be used
 
     Raises
@@ -297,22 +309,9 @@ def bin_features(df: DataFrame,
     else:
         ntile_dict = {col: ntiles for col in cols}
 
-    _persist_if_unpersisted(df)
-    all_count = df.count()
-    if (sample_num is None) | (all_count <= sample_num):
-        if isinstance(sample_num, int):
-            logging.getLogger(__name__).info("no sampling necessary {c:,} <= {sn:,}".format(c=all_count, sn=sample_num))
-        else:
-            logging.getLogger(__name__).info("requested not to sample, df of size {c:,}".format(c=all_count))
-        sample_df = df
-        sample_count = all_count
-    else:  # all_count > sample_num:
-        frac = sample_num / all_count
-        logging.getLogger(__name__).info("sampling {c:,} by {f:.2f} to {sn:,}".format(c=all_count, f=frac, sn=sample_num))
-        sample_df = df.sample(withReplacement=False, fraction=frac, seed=42)
-        sample_df.persist(StorageLevel(False, True, False, False))
-        # not guaranteed to be equal to sample_num
-        sample_count = sample_df.count()
+    sample_df = _sample_df(df=df, sample_size=sample_size)
+    _persist_if_unpersisted(sample_df)
+    sample_count = sample_df.count()
 
     num_pinned = 0
     for col, ntile in ntile_dict.items():
@@ -337,7 +336,7 @@ def bin_features(df: DataFrame,
         # add 1 to conform to mathematical indexing of ntiling
         df = df.withColumn("binned_{col}".format(col=col), make_udf(threshs)(F.col(col)) + 1)
 
-    logging.getLogger("{n:,} of {m:,} columns have min_val pinned first ntile".format(n=num_pinned, m=len(ntile_dict)))
+    logging.getLogger(__name__).info("{n:,} of {m:,} columns have min_val pinned first ntile".format(n=num_pinned, m=len(ntile_dict)))
     binned_cols = ["binned_{col}".format(col=col) for col in cols]
 
     assembler = mlf.VectorAssembler(inputCols=binned_cols, outputCol=features_col)
@@ -446,7 +445,7 @@ def reduce_chi_dimensionality(
     if isinstance(sample_size, int):
         ss = "{:,}".format(sample_size)
     else: ss = str(sample_size)
-    logging.getLogger(__name__).info("using chi method to reduce dim with params"
+    logging.getLogger(__name__).info("using chi method to reduce dim with params "
                                      "ncols={nc:,} drop_uninformative={du} sample_size={ss}".format(
             nc=ncols, du=str(drop_uninformative), ss=ss))
 
@@ -457,7 +456,7 @@ def reduce_chi_dimensionality(
         logging.getLogger(__name__).critical("ncols({nc}) type is illegal".format(nc=str(ncols)))
         raise ValueError("ncols is not int but type {type_}".format(type_=type(ncols)))
 
-    if ncols <= len(binned_pred_cols):
+    if len(binned_pred_cols) <= ncols:
         logging.getLogger(__name__).info("{n:,} predictors is already less/equal to desired {m:,}".format(n=len(binned_pred_cols),m=ncols))
         if drop_uninformative:
             informative_selector = mlf.ChiSqSelector(selectorType='fwe',
@@ -606,20 +605,8 @@ def reduce_log_dimensionality(df: DataFrame,
     else:
         log_estimator = mlc.LogisticRegression(**log_args)
 
-    all_count = df.count()
-    if (sample_size is None) | (all_count <= sample_size):
-        if isinstance(sample_size, int):
-            logging.getLogger(__name__).info("no sampling necessary {c:,} <= {sn:,}".format(c=all_count, sn=sample_size))
-        else:
-            logging.getLogger(__name__).info("requested not to sample, df of size {c:,}".format(c=all_count))
-        sample_df = df
-        sample_count = all_count
-    else:  # all_count > sample_num:
-        frac = sample_size / all_count
-        logging.getLogger(__name__).info("sampling {c:,} by {f:.2f} to {sn:,}".format(c=all_count, f=frac, sn=sample_size))
-        sample_df = df.sample(withReplacement=False, fraction=frac, seed=42)
-        sample_df.persist(StorageLevel(False, True, False, False))
-
+    sample_df = _sample_df(df=df, sample_size=sample_size)
+    _persist_if_unpersisted(sample_df)
     log_model = log_estimator.fit(sample_df)
     # sort abs value greatest to least
     coeffs = sorted(zip(binned_pred_cols, log_model.coefficients), key=lambda x: -abs(x[1]))

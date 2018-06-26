@@ -38,3 +38,4 @@ model, df2 = estimator.fit(df)
 df3, match_info = model.transform(df2)
 treatment_rate, control_rate, adjusted_response = model.determine_impact(df3)
 perf_sum = model.evaluate_performance(pre_df=df2, post_df=df3, transform_df=df2)
+

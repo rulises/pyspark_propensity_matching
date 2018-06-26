@@ -14,7 +14,7 @@ from pyspark.ml import evaluation as mle
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
 
-from .utils import _persist_if_unpersisted, _get_pred_cols, _time_log
+from .utils import _persist_if_unpersisted, _get_pred_cols, _time_log, _sample_df
 
 # container for model performance
 propensity_model_performance_summary = namedtuple('propensity_model_performance_summary', [
@@ -46,6 +46,7 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
              test_df: Optional[DataFrame] = None,
              train_df: Optional[DataFrame] = None,
              transform_df: Optional[DataFrame] = None,
+             sample_size: Optional[int] = 10**5
              ) -> performance_summary:
     r"""evaluates the goodness of match and the power of the propensity
     model
@@ -140,8 +141,8 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
     cols = pred_cols + [label_col]
     try:
         bias_df, total_bias_reduced, starting_bias_mean, starting_bias_var \
-            = _eval_match_performance(pre_df.select(cols), post_df.select(cols), label_col)
-    except AssertionError as e:
+            = _eval_match_performance(pre_df.select(cols), post_df.select(cols), label_col, sample_size=sample_size)
+    except ValueError as e:
         logging.getLogger(__name__).warning("eval_match_performance failed with warning {e}".format(e=str(e)))
         warnings.warn(e)
         bias_df = None
@@ -246,8 +247,8 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
 
 @_time_log
 def _eval_df_model(df: DataFrame,
-                   prob_mod: Type[pyspark.ml.Model],
-                   sample_num: Optional[int] = 10 ** 6) -> propensity_model_performance_summary:
+                   prob_mod: pyspark.ml.Model,
+                   sample_size: Optional[int] = 10 ** 5) -> propensity_model_performance_summary:
     r"""calculate binary classification model metrics on provided dataframe
 
     Calculate accuracy, precision, and recall at maximum value for
@@ -271,7 +272,7 @@ def _eval_df_model(df: DataFrame,
 
     Other Parameters
     ----------------
-    sample_num: int
+    sample_size: int
         max sample size to calculate performance. Defaults to 10**6, can be
         left as None to avoid sampling
 
@@ -296,15 +297,8 @@ def _eval_df_model(df: DataFrame,
     _calc_auc_auprc
     _calc_model_metrics
     """
-    _persist_if_unpersisted(df)
-    all_count = df.count()
-
-    if (sample_num is None) | (all_count <= sample_num):
-        sample_df = df
-    else:
-        frac = sample_num / all_count
-        sample_df = df.sample(withReplacement=False, fraction=frac, seed=42)
-        sample_df.persist(StorageLevel(False, True, False, False, 1))
+    sample_df = _sample_df(df=df, sample_size=sample_size)
+    _persist_if_unpersisted(sample_df)
 
     label_col = prob_mod.getOrDefault('labelCol')
     prob_col = prob_mod.getOrDefault('probabilityCol')
@@ -365,6 +359,7 @@ def _calc_auc_auprc(df: DataFrame,
 
     return auc, auprc
 
+
 @_time_log
 def _calc_model_metrics(df: DataFrame,
                         prob_col: str,
@@ -420,10 +415,12 @@ def _calc_model_metrics(df: DataFrame,
 
     return max_metrics
 
+
 @_time_log
 def _eval_match_performance(pre_df: DataFrame,
                             post_df: DataFrame,
-                            label_col) -> Tuple[pd.DataFrame, float, float, float]:
+                            label_col: str,
+                            sample_size: Optional[int]) -> Tuple[pd.DataFrame, float, float, float]:
     r""" evaluate propensity match performance given the pre and post
     match samples
 
@@ -477,13 +474,21 @@ def _eval_match_performance(pre_df: DataFrame,
     _calc_bias
     _calc_var
     """
+    _persist_if_unpersisted(pre_df)
     if pre_df.where(F.col(label_col) == 1).count() <= 0:
         logging.getLogger(__name__).critical("somehow dont have positive samples in pre_df, this shouldnt happen")
-        assert pre_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in pre_df'
+        raise ValueError('no positive samples in pre_df')
 
+    _persist_if_unpersisted(post_df)
     if post_df.where(F.col(label_col) == 1).count() <= 0:
         logging.getLogger(__name__).critical("somehow dont have positive samples in post_df, this shouldnt happen")
-        assert post_df.where(F.col(label_col) == 1).count() > 0, 'no positive samples in post_df'
+        raise ValueError("no positive samples in post df")
+
+    sampled_pre_df = _sample_df(df=pre_df, sample_size=sample_size)
+    _persist_if_unpersisted(sampled_pre_df)
+
+    sampled_post_df = _sample_df(df=post_df, sample_size=sample_size)
+    _persist_if_unpersisted(sampled_post_df)
 
     stan_bias_red_df, total_bias_reduced = _calc_standard_bias_reduced(pre_df, post_df, label_col)
     logging.getLogger(__name__).info("total bias reduced: {tbr:.2f}".format(tbr=total_bias_reduced))
@@ -493,6 +498,7 @@ def _eval_match_performance(pre_df: DataFrame,
     logging.getLogger(__name__).info("starting mean: {sbm:,.2f}   starting var: {sbv:,.2f}".format(sbm=starting_bias_mean, sbv=starting_bias_var))
 
     return bias_df, total_bias_reduced, starting_bias_mean, starting_bias_var
+
 
 @_time_log
 def _calc_bias(df: DataFrame,
@@ -528,6 +534,7 @@ def _calc_bias(df: DataFrame,
     bias_df = bias_df.set_index('index')[['bias']]
     bias_df = bias_df.loc[bias_df.index != 'label', :]
     return bias_df
+
 
 @_time_log
 def _calc_standard_bias(df: DataFrame,
@@ -571,6 +578,7 @@ def _calc_standard_bias(df: DataFrame,
     bias_red_df = bias_red_df[['standard_bias']]
     return bias_red_df
 
+
 @_time_log
 def _calc_var(df: pyspark.sql.DataFrame,
               label_col: str) -> pd.DataFrame:
@@ -606,6 +614,7 @@ def _calc_var(df: pyspark.sql.DataFrame,
     s_var_df.columns = ["var_{0}".format(x) for x in s_var_df.columns]
     s_var_df = s_var_df.loc[s_var_df.index != 'label', :]
     return s_var_df
+
 
 @_time_log
 def _calc_bias_reduced(pre_df: DataFrame,
@@ -661,6 +670,7 @@ def _calc_bias_reduced(pre_df: DataFrame,
     starting_bias_var = float(b_red_df['pre_bias'].var())
 
     return b_red_df, starting_bias_mean, starting_bias_var
+
 
 @_time_log
 def _calc_standard_bias_reduced(pre_df: DataFrame,

@@ -185,6 +185,7 @@ class PropensityEstimator:
         Uncaught Errors:
             invalid param args.
         """
+        _persist_if_unpersisted(df)
 
         df_count = df.count()
         if df_count <= MINIMUM_DF_COUNT:
@@ -199,7 +200,7 @@ class PropensityEstimator:
             assert pos_count > MINIMUM_POS_COUNT, "not enough positive samples in df to fit"
 
 
-        logging.getLogger(__name__).info("fitting to df with total size {n} and pos size {pos_n}".format(n=df_count, pos_n=pos_count))
+        logging.getLogger(__name__).info("fitting to df with total size {n:,} and pos size {pos_n:,}".format(n=df_count, pos_n=pos_count))
 
         df = self._prep_data(df)
         self.df = df

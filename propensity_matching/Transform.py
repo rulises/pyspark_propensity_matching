@@ -16,7 +16,7 @@ import pyspark.ml.classification as mlc
 
 
 
-from .utils import _persist_if_unpersisted, _time_log
+from .utils import _persist_if_unpersisted, _time_log, _sample_df
 from .config import UTIL_BOOST_THRESH_1, UTIL_BOOST_THRESH_2, UTIL_BOOST_THRESH_3,\
                     SMALL_MATCH_THRESHOLD, MINIMUM_POS_COUNT
 
@@ -344,7 +344,7 @@ def _quantile_match(df: DataFrame,
                     metric_col: str,
                     ntile: int = 10,
                     quantile_error_scale: int = 5,
-                    sample_num: int = 10**5) -> Tuple[DataFrame, dict]:
+                    sample_size: int = 10**5) -> Tuple[DataFrame, dict]:
     r"""match by stratified sampling on probability bins. guarantee similar
     populations.
 
@@ -371,7 +371,7 @@ def _quantile_match(df: DataFrame,
         be cognizant of ntile, and this value, as passing a small
         relativeError can increase compute time dramatically
         defaults to 5
-    sample_num: Optional[int]
+    sample_size: Optional[int]
         size of sample used to calculate quantile bin boundaries
         no sampling if None, not recommended
         defauts to 10**5
@@ -402,10 +402,10 @@ def _quantile_match(df: DataFrame,
 
     """
     logging.getLogger(__name__).info("starting _quantile_match with args ntile={ntile}, quantile_error_scale={qes}, /"
-                                     "sample_num={sn}".format(ntile=ntile, qes=quantile_error_scale, sn=sample_num))
+                                     "sample_size={sn}".format(ntile=ntile, qes=quantile_error_scale, sn=sample_size))
 
     label_col = prob_mod.getOrDefault('labelCol')
-    df, match_col = _make_quantile_match_col(df, metric_col, label_col, ntile, quantile_error_scale, sample_num)
+    df, match_col = _make_quantile_match_col(df, metric_col, label_col, ntile, quantile_error_scale, sample_size)
     df, match_info = _execute_quantile_match(df, match_col, label_col)
     match_info['type'] = 'quantile'
 
@@ -418,7 +418,7 @@ def _make_quantile_match_col(df: DataFrame,
                              label_col: str,
                              ntile: int,
                              quantile_error_scale: Optional[Union[int, float]],
-                             sample_num: Optional[int]) -> Tuple[DataFrame, str]:
+                             sample_size: Optional[int]) -> Tuple[DataFrame, str]:
     r"""bin probability column and return it to be matched
 
 
@@ -439,7 +439,7 @@ def _make_quantile_match_col(df: DataFrame,
         as a fraction of the bin size
         be cognizant of ntile, and this value, as passing a small
         relativeError can increase compute time dramatically
-    sample_num: Optional[int]
+    sample_size: Optional[int]
         size of sample used to calculate quantile bin boundaries
         no sampling if None, not recommended
 
@@ -458,20 +458,15 @@ def _make_quantile_match_col(df: DataFrame,
 
     See Also
     --------
-    _quantile_match: calls it, sets default args for `ntile`, `sample_num`,
+    _quantile_match: calls it, sets default args for `ntile`, `sample_size`,
         and `quantile_error_scale`
     """
 
     t_df = df.where(F.col(label_col) == 1)
     _persist_if_unpersisted(t_df)
-    t_count = t_df.count()
-    if (sample_num is None) | (t_count < sample_num):
-        t_sample_df = t_df
-    else:
-        frac = sample_num/t_count
-        t_sample_df = t_df.sample(withReplacement=False, fraction=frac, seed=42)
-        _persist_if_unpersisted(t_sample_df)
 
+    t_sample_df = _sample_df(df=t_df, sample_size=sample_size)
+    _persist_if_unpersisted(t_sample_df)
     # create thresholds for ntiles, convert to native float from numpy float for use w/ pyspark
     probs = [float(x) for x in np.linspace(start=0, stop=1, num=ntile, endpoint=False)][1:]
 
