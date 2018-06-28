@@ -46,7 +46,8 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
              test_df: Optional[DataFrame] = None,
              train_df: Optional[DataFrame] = None,
              transform_df: Optional[DataFrame] = None,
-             sample_size: Optional[int] = 10**5
+             sample_size: Optional[int] = 10**6,
+             metrics_args: Optional[dict] = None
              ) -> performance_summary:
     r"""evaluates the goodness of match and the power of the propensity
     model
@@ -72,6 +73,18 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
         the whole dataframe. Often a superset of `train_df` and `test_df`
         also frequently has different class balance
         if `None`, transform_prob_mod_perf returns `None`
+    sample_size: int = 10**6
+        passed to eval match performance. Indicates size of sample to
+        evaluate match performance - used to improve speed of calculation.
+        Maybe be left as None for no sampling.
+    metrics_args : dict
+        passed to _eval_propenisty_model - not to match performance
+        dict where keys are df var names and value is bool of whether to
+        retrieve acc, prec, rec, thresh, informativeness for them. default
+        value is {"transform_df":True}. Keys not in metrics_arg are treated
+        as false. can take several min to calc per df so the "test_df" and
+        "train_df" are left out for performance. Note that auc and auprc
+        are always retrieved.
 
     Returns
     -------
@@ -122,7 +135,11 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
     """
 
     test_prob_mod_perf, train_prob_mod_perf, transform_prob_mod_perf = \
-        _eval_propensity_model(prob_mod=prob_mod, test_df=test_df, train_df=train_df, transform_df=transform_df)
+        _eval_propensity_model(prob_mod=prob_mod,
+                               test_df=test_df,
+                               train_df=train_df,
+                               transform_df=transform_df,
+                               metrics_args=metrics_args)
 
     label_col = prob_mod.getOrDefault('labelCol')
     features_col = prob_mod.getOrDefault('featuresCol')
@@ -166,7 +183,8 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
 def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
                            test_df: Optional[DataFrame],
                            train_df: Optional[DataFrame],
-                           transform_df: Optional[DataFrame])\
+                           transform_df: Optional[DataFrame],
+                           metrics_args: Optional[dict])\
         ->Tuple[Optional[propensity_model_performance_summary],
                 Optional[propensity_model_performance_summary],
                 Optional[propensity_model_performance_summary]]:
@@ -189,6 +207,12 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
         the whole dataframe. Often a superset of `train_df` and `test_df`
         also frequently has different class balance
         if `None`, transform_prob_mod_perf returns `None`
+    metrics_args : dict
+        dict where keys are df var names and value is bool of whether to
+        retrieve acc, prec, rec, thresh, informativeness for them. default
+        value is {"transform_df":True}. Keys not in metrics_arg are treated
+        as false. can take several min to calc per df so the "test_df" and
+        "train_df" are left out for performance.
 
 
     Returns
@@ -221,25 +245,34 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
         'recall' : float
         'accuracy'  : float
     """
+    if metrics_args is None:
+        metrics_args = {"transform_df":True}
+
     if train_df is None:
         train_prob_mod_perf = None
         logging.getLogger(__name__).info("train_df is None")
     else:
-        train_prob_mod_perf = _eval_df_model(df=train_df, prob_mod=prob_mod)
+        train_prob_mod_perf = _eval_df_model(df=train_df,
+                                             prob_mod=prob_mod,
+                                             additional_metrics=metrics_args.get("train_df", False))
         logging.getLogger(__name__).info("train_prob_mod_perf: {perf}".format(perf=str(train_prob_mod_perf)))
 
     if test_df is None:
         test_prob_mod_perf = None
         logging.getLogger(__name__).info("test_df is None")
     else:
-        test_prob_mod_perf = _eval_df_model(df=test_df, prob_mod=prob_mod)
+        test_prob_mod_perf = _eval_df_model(df=test_df,
+                                            prob_mod=prob_mod,
+                                            additional_metrics=metrics_args.get("test_df", False))
         logging.getLogger(__name__).info("test_prob_mod_perf: {perf}".format(perf=str(test_prob_mod_perf)))
 
     if transform_df is None:
         transform_prob_mod_perf = None
         logging.getLogger(__name__).info("transform_df is None")
     else:
-        transform_prob_mod_perf = _eval_df_model(df=transform_df, prob_mod=prob_mod)
+        transform_prob_mod_perf = _eval_df_model(df=transform_df,
+                                                 prob_mod=prob_mod,
+                                                 additional_metrics=metrics_args.get("transform_df", False))
         logging.getLogger(__name__).info("transform_prob_mod_perf: {perf}".format(perf=str(transform_prob_mod_perf)))
 
     return test_prob_mod_perf, train_prob_mod_perf, transform_prob_mod_perf
@@ -248,7 +281,8 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
 @_time_log
 def _eval_df_model(df: DataFrame,
                    prob_mod: pyspark.ml.Model,
-                   sample_size: Optional[int] = 10 ** 5) -> propensity_model_performance_summary:
+                   sample_size: Optional[int] = 10 ** 5,
+                   additional_metrics: bool = False) -> propensity_model_performance_summary:
     r"""calculate binary classification model metrics on provided dataframe
 
     Calculate accuracy, precision, and recall at maximum value for
@@ -265,6 +299,9 @@ def _eval_df_model(df: DataFrame,
         The type above can either refer to an actual Python type
         (e.g. ``int``), or describe the type of the variable in more
         detail, e.g. ``(N,) ndarray`` or ``array_like``.
+    sample_size
+    additional_metrics
+
 
     Returns
     -------
@@ -310,9 +347,13 @@ def _eval_df_model(df: DataFrame,
     sample_df.persist(StorageLevel(False, True, False, False, 1))
 
     auc, auprc = _calc_auc_auprc(df=sample_df, prob_col=prob_1_col, label_col=label_col)
-    metrics_dict = _calc_model_metrics(df=sample_df, prob_col=prob_1_col, label_col=label_col)
-    metrics_dict = {x: metrics_dict[x] for x in metrics_dict.keys() if x in
-                    ['threshold', 'informativeness', 'precision', 'recall', 'accuracy']}
+
+    metric_keys = ['threshold', 'informativeness', 'precision', 'recall', 'accuracy']
+    if additional_metrics:
+        metrics_dict = _calc_model_metrics(df=sample_df, prob_col=prob_1_col, label_col=label_col)
+        metrics_dict = {x: metrics_dict[x] for x in metrics_dict.keys() if x in metric_keys}
+    else:
+        metrics_dict = {x: None for x in metric_keys}
 
     prob_mod_per_sum = propensity_model_performance_summary(auc=auc, auprc=auprc, **metrics_dict)
 

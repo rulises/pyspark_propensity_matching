@@ -8,6 +8,7 @@ import pyspark.sql as pys
 import pyspark.sql.functions as F
 import pyspark.ml as ml
 import pyspark.ml.classification as mlc
+import pyspark.ml.feature as mlf
 
 from .config import MINIMUM_DF_COUNT, MINIMUM_POS_COUNT, SAMPLES_PER_FEATURE
 from .model import PropensityModel
@@ -141,7 +142,6 @@ class PropensityEstimator:
         UncaughtExceptions
         """
 
-
         if probability_estimator is None:
             probability_estimator = mlc.LogisticRegression(**self.default_probability_estimator_args)
 
@@ -204,7 +204,6 @@ class PropensityEstimator:
 
         df = self._prep_data(df)
         self.df = df
-        self._rebalance_df()
         self._split_test_train()
         self._prepare_probability_model()
         model = PropensityModel(
@@ -304,21 +303,18 @@ class PropensityEstimator:
 
         # leakage note: evaluation of informativeness of predictors includes test set
         # not ideal but minimal impact and is expedient for architecture right now.
-
-        # number of ncols depends on size of train_set so we call it here to get number as a throwaway and call it again
-        # later in _fit. opportunity for optimization #TODO
-        logging.getLogger(__name__).info("one-off rebalance of df to get train set count")
         self.df = df
         self._rebalance_df()
-        ncols = int((self.rebalanced_df.where(F.col(label_col)==1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
-        del self.df
-        del self.rebalanced_df
+        ncols = int((self.rebalanced_df.where(F.col(label_col) == 1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
         red_dim_args = {'df': df,
                         'label_col': label_col,
                         'binned_features_col': features_col,
                         'ncols': ncols}
         logging.getLogger(__name__).info("reducing dimensionality of df")
-        df, pred_cols = reduce_dimensionality(args=red_dim_args)
+        self.rebalanced_df, pred_cols = reduce_dimensionality(args=red_dim_args)
+
+        assembler = mlf.VectorAssembler(inputCols=pred_cols, outputCol=features_col)
+        df = assembler.transform(df.drop(features_col))
 
         return df
 

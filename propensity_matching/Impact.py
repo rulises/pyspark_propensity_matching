@@ -3,6 +3,7 @@ import logging
 from typing import Tuple, Type
 
 import pyspark
+import pyspark.sql.functions as F
 import pyspark.ml.feature as mlf
 import pyspark.ml.classification as mlc
 
@@ -87,16 +88,17 @@ def impact(df: pyspark.sql.DataFrame,
         logging.getLogger(__name__).info("additional bias adjustment inapplicable, returning naive difference")
         return treatment_rate, control_rate, (control_rate-treatment_rate)
 
-    logging.getLogger(__name__).info("additional bias adjustment necessary")
+    logging.getLogger(__name__).info("additional bias adjustment possible")
     # choose fewer features if appropriate to prevent overfit. round down
-    num_preds = math.floor(df.count()/SAMPLES_PER_FEATURE) - 1
+    num_preds = int(df.where(F.col(label_col)==1).count()//SAMPLES_PER_FEATURE) - 1
     logging.getLogger(__name__).info("need max {n:,} predictors".format(n=num_preds))
     if num_preds < len(list(pred_cols)):
         logging.getLogger(__name__).info("desired predictors {np:,} is less than existing {ep:,}, reducing dimensionality".format(np=num_preds, ep=len(pred_cols)))
         kwargs = {
             'df': df,
             'label_col': label_col,
-            'binned_features_col': features_col
+            'binned_features_col': features_col,
+            'ncols': num_preds
             }
         df, pred_cols = reduce_dimensionality(args=kwargs, method='chi')
 

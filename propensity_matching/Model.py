@@ -1,5 +1,5 @@
 """Defines PropensityModel"""
-from typing import Tuple
+from typing import Tuple, Optional
 from collections import namedtuple
 import logging
 
@@ -124,9 +124,11 @@ class PropensityModel():
 
     @_time_log
     def evaluate_performance(self,
-                             pre_df,
-                             post_df,
-                             transform_df)-> namedtuple:
+                             pre_df: DataFrame,
+                             post_df: DataFrame,
+                             transform_df: DataFrame,
+                             sample_size: Optional[int] = 10**6,
+                             metrics_args: Optional[dict] = None)-> namedtuple:
         r"""provides goodness metrics for propensity match
 
         Considers both the probability model as well as the matching itself
@@ -190,5 +192,7 @@ class PropensityModel():
                                         post_df=post_df,
                                         test_df=self.test_set,
                                         train_df=self.train_set,
-                                        transform_df=transform_df)
+                                        transform_df=transform_df,
+                                        sample_size=sample_size,
+                                        metrics_args=metrics_args)
         return performance_summary

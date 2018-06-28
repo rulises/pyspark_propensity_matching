@@ -314,6 +314,8 @@ def bin_features(df: DataFrame,
     sample_count = sample_df.count()
 
     num_pinned = 0
+
+    _persist_if_unpersisted(df)
     for col, ntile in ntile_dict.items():
         relative_error = 1 / ntile / error_scale
         min_val = sample_df.select(F.min(F.col(col))).take(1)[0][0]

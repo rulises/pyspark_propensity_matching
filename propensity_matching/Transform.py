@@ -166,7 +166,7 @@ def _transform(df: DataFrame,
         _persist_if_unpersisted(df)
         pos_count = df.where(F.col(label_col)==1).count()
         neg_count = df.where(F.col(label_col)==0).count()
-        if (pos_count*neg_count) <= SMALL_MATCH_THRESHOLD:
+        if ((pos_count**2)*neg_count) <= SMALL_MATCH_THRESHOLD:
             method = 'assignment'
             logging.getLogger(__name__).info("auto method is assignment")
         else:
