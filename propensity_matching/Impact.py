@@ -1,6 +1,6 @@
 import math
 import logging
-from typing import Tuple, Type
+from typing import Tuple
 
 import pyspark
 import pyspark.sql.functions as F
@@ -8,13 +8,13 @@ import pyspark.ml.feature as mlf
 import pyspark.ml.classification as mlc
 
 from .config import NAIVE_THRESHOLD_COUNT, SAMPLES_PER_FEATURE, MINIMUM_POS_COUNT
-from .utils import reduce_dimensionality, bin_features, _persist_if_unpersisted, _get_pred_cols, _time_log
+from .utils import reduce_dimensionality, _persist_if_unpersisted, _get_pred_cols, _time_log
 
 
 @_time_log
 def impact(df: pyspark.sql.DataFrame,
            response_col: str,
-           prob_mod: Type[mlc.Model]
+           prob_mod: mlc.Model
            ) -> Tuple[float, float, float]:
     r"""observe impact of treatment on response variable
 
@@ -29,12 +29,9 @@ def impact(df: pyspark.sql.DataFrame,
     ----------
     df: pyspark.sql.DataFrame
     response_col: str
-    prob_mod: Type[mlc.Model]
+    prob_mod: Tmlc.Model
         propensity model, mostly used to keep track of feature_col,
         label_col, pred_cols
-    binned: bool
-        where the predictor cols binned ?
-
 
     Returns
     -------
@@ -90,7 +87,7 @@ def impact(df: pyspark.sql.DataFrame,
 
     logging.getLogger(__name__).info("additional bias adjustment possible")
     # choose fewer features if appropriate to prevent overfit. round down
-    num_preds = int(df.where(F.col(label_col)==1).count()//SAMPLES_PER_FEATURE) - 1
+    num_preds = int(df.where(F.col(label_col) == 1).count() // SAMPLES_PER_FEATURE) - 1
     logging.getLogger(__name__).info("need max {n:,} predictors".format(n=num_preds))
     if num_preds < len(list(pred_cols)):
         logging.getLogger(__name__).info("desired predictors {np:,} is less than existing {ep:,}, reducing dimensionality".format(np=num_preds, ep=len(pred_cols)))

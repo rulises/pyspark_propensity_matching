@@ -1,18 +1,16 @@
-import math
-from typing import Tuple, Type, Optional, Union
 import logging
+import math
+from typing import  Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-
-
 import pyspark
 from pyspark.sql import DataFrame
+import pyspark.ml.classification as mlc
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
-import pyspark.ml.classification as mlc
 
 
 
@@ -23,7 +21,7 @@ from .config import UTIL_BOOST_THRESH_1, UTIL_BOOST_THRESH_2, UTIL_BOOST_THRESH_
 
 @_time_log
 def transform(df: DataFrame,
-              prob_mod: Type[mlc.Model],
+              prob_mod: mlc.Model,
               method: Optional[str] = None,
               metric: Optional[str] = None,
               match_kwargs: Optional[dict] = None) ->Tuple[DataFrame, dict]:
@@ -38,12 +36,12 @@ def transform(df: DataFrame,
     df : pyspark.sql.DataFrame
         Dataframe with population in question. Must have featureCol and
         labelCol used in `prob_mod`
-    prob_mod : Type[mlc.Model]
+    prob_mod : mlc.Model
         the model predicting the probability that the row is in class 1
         in the label col.
     method : {'auto', 'quantile', 'assignment'}
         how matching occurs. auto will select according to the number of
-        rows specified config as `SMALL_MATCH_THRESHOLD`
+        rows specified in config as `SMALL_MATCH_THRESHOLD`
 
         Quantile does stratified sampling on predicted probability.
         It guarantees similar population sizes and may drop some treatments
@@ -62,7 +60,7 @@ def transform(df: DataFrame,
     Returns
     -------
     df : pyspark.sql.DataFrame
-        df with only matched populations ( so dont overwrite your parent
+        df with only matched populations (so dont overwrite your parent
         dataframe if you need it!)
     match_info : dict
         information about that particular match depending on the algorithm
@@ -86,7 +84,7 @@ def transform(df: DataFrame,
 
 @_time_log
 def _transform(df: DataFrame,
-               prob_mod: Type[mlc.Model],
+               prob_mod: mlc.Model,
                method: Optional[str],
                metric: Optional[str],
                match_kwargs: Optional[dict] = None) -> Tuple[DataFrame, dict]:
@@ -101,12 +99,12 @@ def _transform(df: DataFrame,
     df : pyspark.sql.DataFrame
         Dataframe with population in question. Must have featureCol and
         labelCol used in `prob_mod`
-    prob_mod : Type[mlc.Model]
+    prob_mod : mlc.Model
         the model predicting the probability that the row is in class 1
         in the label col.
     method : {'auto', 'quantile', 'assignment'}
         how matching occurs. auto will select according to the number of
-        rows specified config as `SMALL_MATCH_THRESHOLD`
+        rows specified in config as `SMALL_MATCH_THRESHOLD`
 
         Quantile does stratified sampling on predicted probability.
         It guarantees similar population sizes and may drop some treatments
@@ -164,8 +162,8 @@ def _transform(df: DataFrame,
         label_col = prob_mod.getOrDefault('labelCol')
 
         _persist_if_unpersisted(df)
-        pos_count = df.where(F.col(label_col)==1).count()
-        neg_count = df.where(F.col(label_col)==0).count()
+        pos_count = df.where(F.col(label_col) == 1).count()
+        neg_count = df.where(F.col(label_col) == 0).count()
         if ((pos_count**2)*neg_count) <= SMALL_MATCH_THRESHOLD:
             method = 'assignment'
             logging.getLogger(__name__).info("auto method is assignment")
@@ -229,7 +227,6 @@ def _get_metric(df: DataFrame,
     but will be useful once more metrics are added
 
     """
-
     functions_dict = {'probability': _get_probability}
     df, metric_col = functions_dict[metric](df, prob_mod)
     return df, metric_col
@@ -246,14 +243,14 @@ def _get_probability(df: DataFrame,
     df : pyspark.sql.DataFrame
         Dataframe with population in question. Must have featureCol and
         labelCol used in `prob_mod`
-    prob_mod : Type[mlc.Model]
+    prob_mod : mlc.Model
         the model predicting the probability that the row is in class 1
         in the label col.
     Returns
     -------
     df : pyspark.sql.DataFrame
         input dataframe but with new metric column
-    metric_col : str
+    prob_1_col : str
         name of the metric column now in `df`
 
     Raises
@@ -276,7 +273,7 @@ def _get_probability(df: DataFrame,
 
 @_time_log
 def _match(df: DataFrame,
-           prob_mod: Type[mlc.Model],
+           prob_mod: mlc.Model,
            method: str,
            metric_col: str,
            match_kwargs: Optional[dict] = None):
@@ -287,7 +284,7 @@ def _match(df: DataFrame,
     df : pyspark.sql.DataFrame
         Dataframe with population in question. Must have featureCol and
         labelCol used in `prob_mod`
-    prob_mod : Type[mlc.Model]
+    prob_mod : mlc.Model
         the model predicting the probability that the row is in class 1
         in the label col.
     method : {'auto', 'quantile', 'assignment'}
@@ -340,7 +337,7 @@ def _match(df: DataFrame,
 
 @_time_log
 def _quantile_match(df: DataFrame,
-                    prob_mod: Type[mlc.Model],
+                    prob_mod: mlc.Model,
                     metric_col: str,
                     ntile: int = 10,
                     quantile_error_scale: int = 5,
@@ -783,7 +780,7 @@ def _sample_dfs(t_df: pyspark.sql.DataFrame,
 
 @_time_log
 def _assignment_match(df: DataFrame,
-                      prob_mod: Type[mlc.Model],
+                      prob_mod: mlc.Model,
                       metric_col: str) ->Tuple[DataFrame, dict]:
     r"""match treatment to controls 1:1
 
@@ -796,7 +793,7 @@ def _assignment_match(df: DataFrame,
     df: DataFrame
         dataframe in question, must have input columns specified by
         prob_mod
-    prob_mod: Type[mlc.Model]
+    prob_mod: mlc.Model
         propenisty predicting model. used here mostly to grab label/feature
         columns. metric col should have been constructed by another method
         prior
@@ -851,8 +848,8 @@ def _assignment_match(df: DataFrame,
     """
 
     label_col = prob_mod.getOrDefault('labelCol')
-    t_df = df.where(F.col(label_col)==1)
-    c_can_df = df.where(F.col(label_col)==0)
+    t_df = df.where(F.col(label_col) == 1)
+    c_can_df = df.where(F.col(label_col) == 0)
 
     t_adjusted_df, c_can_adjusted_df, match_info = _adjust_balance(t_df, c_can_df, metric_col)
 
@@ -1071,6 +1068,7 @@ def _execute_assignment_match(cost_matrix: np.matrix)->Tuple[np.ndarray, np.ndar
 
     return c_ind, t_ind, total_cost, average_cost
 
+
 @_time_log
 def _get_assigned_rows(t_ind: np.ndarray,
                        t_df: DataFrame,
@@ -1118,7 +1116,7 @@ def _get_assigned_rows(t_ind: np.ndarray,
 
     c_bool_idx = [False] * c_can_df.count()
     for idx in c_ind:
-        c_bool_idx[idx]=True
+        c_bool_idx[idx] = True
     c_bool_idx = zip(range(1, len(c_bool_idx) + 1), c_bool_idx)
     c_bool_idx = spark.createDataFrame(data=c_bool_idx)
     c_bool_idx = c_bool_idx.select(F.col('_1').alias('rownum'), F.col('_2').alias('chosen'))
@@ -1132,10 +1130,3 @@ def _get_assigned_rows(t_ind: np.ndarray,
     df = t_df.union(c_matched_df.select(t_df.columns))
 
     return df
-
-
-
-
-
-
-

@@ -1,18 +1,16 @@
 """module holding PropensityEstimator (ml.Estimator)."""
-from typing import Optional, Tuple
 import logging
-import warnings
+from typing import Optional, Tuple
 
-from pyspark.sql import DataFrame
-import pyspark.sql as pys
-import pyspark.sql.functions as F
 import pyspark.ml as ml
 import pyspark.ml.classification as mlc
 import pyspark.ml.feature as mlf
+from pyspark.sql import DataFrame
+import pyspark.sql.functions as F
 
 from .config import MINIMUM_DF_COUNT, MINIMUM_POS_COUNT, SAMPLES_PER_FEATURE
 from .model import PropensityModel
-from .utils import reduce_dimensionality, _persist_if_unpersisted, bin_features, remove_redundant_features, _time_log
+from .utils import _persist_if_unpersisted, _time_log, bin_features, reduce_dimensionality, remove_redundant_features
 
 
 class PropensityEstimator:
@@ -24,7 +22,6 @@ class PropensityEstimator:
     fit_data_prep_args : dict
         args for class balance and test/train split during fitting
     probability_estimator : pyspark.ml.Model = LogisticRegression
-        currently only supported probability estimator
     response_col : str = 'response'
         column containing response variable
     train_set : pyspark.sql.DataFrame
@@ -98,7 +95,7 @@ class PropensityEstimator:
                 'remove_redundant_features':True,
             }
 
-            'class balance' is ration of control_candidates : treatment
+            'class balance' is ratio of control_candidates : treatment
             to train the model on
 
            train_prop is the proportion of the population (post-rebalance)
@@ -116,7 +113,7 @@ class PropensityEstimator:
             args. Dict will passed as kwargs instead.
             see utils.remove_redundant_features for arg details
 
-        probability_estimator: Type[ml.Estimator] = mlc.LogisticRegression
+        probability_estimator: ml.Estimator = mlc.LogisticRegression
 
                 default args are
                 default_probability_estimator_args = {
@@ -129,9 +126,8 @@ class PropensityEstimator:
                 "fitIntercept": True,
                 "probabilityCol": "probability",
                 "family": "binomial"
-            }  and may only be used with LogisticRegression or else a
-            value error will be returned. Correct labelCol and featuresCol
-            are crucial so special attention should be paid to specify them
+            }   Correct labelCol and featuresCol
+            are crucial so special attention should be paid
 
 
         response_col: str ='response'
@@ -152,8 +148,14 @@ class PropensityEstimator:
         self.probability_estimator = probability_estimator
         self.response_col = response_col
 
+        # set vals to None - will be correctly assigned in fit
+
+        self.train_set = None
+        self.test_set = None
+        self.rebalanced_df = None
+
     @_time_log
-    def fit(self, df: pys.DataFrame) -> Tuple[PropensityModel, DataFrame]:
+    def fit(self, df: DataFrame) -> Tuple[PropensityModel, DataFrame]:
         """
         Fit propensity model and return.
 
@@ -190,20 +192,19 @@ class PropensityEstimator:
         df_count = df.count()
         if df_count <= MINIMUM_DF_COUNT:
             logging.getLogger(__name__).critical("df size {s:,} < {MDC:,} is too small to fit model".format(s=df_count, MDC=MINIMUM_DF_COUNT))
-            assert df_count > MINIMUM_DF_COUNT, "df is too small to fit model"
+            raise ValueError("df is too small to fit model")
 
         label_col = self.probability_estimator.getOrDefault('labelCol')
         pos_count = df.where(F.col(label_col) == 1).count()
 
         if pos_count <= MINIMUM_POS_COUNT:
             logging.getLogger(__name__).critical("not enough positive samples {ps:,} < {MPC:,} in df to fit".format(ps=pos_count, MPC=MINIMUM_POS_COUNT))
-            assert pos_count > MINIMUM_POS_COUNT, "not enough positive samples in df to fit"
+            raise ValueError("not enough positive samples in df to fit")
 
 
         logging.getLogger(__name__).info("fitting to df with total size {n:,} and pos size {pos_n:,}".format(n=df_count, pos_n=pos_count))
 
-        df = self._prep_data(df)
-        self.df = df
+        self._prep_data(df)
         self._split_test_train()
         self._prepare_probability_model()
         model = PropensityModel(
@@ -213,7 +214,7 @@ class PropensityEstimator:
             test_set=self.test_set,
             response_col=self.response_col
         )
-        return model, df
+        return model, self.df
 
     @_time_log
     def _prep_data(self,
@@ -225,9 +226,6 @@ class PropensityEstimator:
         Parameters
         ----------
         df : pyspark.sql.DataFrame
-            Array_like means all those objects -- lists, nested lists, etc. --
-            that can be converted to an array.  We can also refer to
-            variables like `var1`.
         self.fit_data_prep_args : dict
             arguments around preparing the data to be fit
             default args are
@@ -238,7 +236,7 @@ class PropensityEstimator:
                 'remove_redundant_features':True,
             }
 
-            'class balance' is ration of control_candidates : treatment
+            'class balance' is ratio of control_candidates : treatment
             to train the model on
 
            train_prop is the proportion of the population (post-rebalance)
@@ -303,20 +301,23 @@ class PropensityEstimator:
 
         # leakage note: evaluation of informativeness of predictors includes test set
         # not ideal but minimal impact and is expedient for architecture right now.
+
+        # num cols is limited by size of training set. To get it we must first rebalance, and multiply by train prop.
+        # reduce dim on whole pop df, then apply the same transform to the rebalanced df
         self.df = df
         self._rebalance_df()
         ncols = int((self.rebalanced_df.where(F.col(label_col) == 1).count() * self.fit_data_prep_args['train_prop'])//SAMPLES_PER_FEATURE)
-        red_dim_args = {'df': df,
+        red_dim_args = {'df': self.df,
                         'label_col': label_col,
                         'binned_features_col': features_col,
                         'ncols': ncols}
         logging.getLogger(__name__).info("reducing dimensionality of df")
-        self.rebalanced_df, pred_cols = reduce_dimensionality(args=red_dim_args)
+        self.df, pred_cols = reduce_dimensionality(args=red_dim_args)
 
         assembler = mlf.VectorAssembler(inputCols=pred_cols, outputCol=features_col)
-        df = assembler.transform(df.drop(features_col))
+        self.rebalanced_df = assembler.transform(self.rebalanced_df.drop(features_col))
 
-        return df
+        return True
 
     @_time_log
     def _rebalance_df(self,) -> bool:
@@ -339,6 +340,7 @@ class PropensityEstimator:
         logging.getLogger(__name__).info("rebalancing df to {class_balance} with pos count {n_pos:,} and neg count {n_neg:,}".format(n_pos=num_1, n_neg=num_0, class_balance=self.fit_data_prep_args['class_balance']))
 
         if num_1 > num_0:
+            logging.getLogger(__name__).critical("class rebalance not implemented for class 1 > class 0")
             raise NotImplementedError("class rebalance not implemented for class 1 > class 0")
 
         # should have already failed out in fit if num_1 would have returned 0

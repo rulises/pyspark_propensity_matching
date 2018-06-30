@@ -1,25 +1,23 @@
 """Utility functions that may be useful at any stage."""
 
 from collections import defaultdict
-from typing import List, Tuple, Optional, Dict, Union, Callable
 import math
-import inspect
 import logging
 import time
-
-
-from pyspark import StorageLevel
-from pyspark.sql import DataFrame
-import pyspark.sql.functions as F
-import pyspark.sql.types as T
-import pyspark.ml.feature as mlf
-import pyspark.ml.classification as mlc
-from pyspark.mllib import stat as mllibs
-from pyspark.mllib.linalg import Vectors
+from typing import List, Tuple, Optional, Dict, Union, Callable
 
 import numpy as np
 from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage, fcluster
+
+from pyspark import StorageLevel
+import pyspark.ml.feature as mlf
+import pyspark.ml.classification as mlc
+from pyspark.mllib import stat as mllibs
+from pyspark.mllib.linalg import Vectors
+from pyspark.sql import DataFrame
+import pyspark.sql.functions as F
+import pyspark.sql.types as T
 
 from .config import SAMPLES_PER_FEATURE
 

@@ -1,7 +1,7 @@
 import warnings
 import logging
 from collections import namedtuple
-from typing import Type, Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict
 
 import pandas as pd
 import numpy as np
@@ -40,7 +40,7 @@ performance_summary = namedtuple('performance_summary', [
 
 
 @_time_log
-def evaluate(prob_mod: Type[pyspark.ml.Model],
+def evaluate(prob_mod: pyspark.ml.Model,
              pre_df: Optional[DataFrame] = None,
              post_df: Optional[DataFrame] = None,
              test_df: Optional[DataFrame] = None,
@@ -180,7 +180,7 @@ def evaluate(prob_mod: Type[pyspark.ml.Model],
 
 
 @_time_log
-def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
+def _eval_propensity_model(prob_mod: pyspark.ml.Model,
                            test_df: Optional[DataFrame],
                            train_df: Optional[DataFrame],
                            transform_df: Optional[DataFrame],
@@ -246,7 +246,7 @@ def _eval_propensity_model(prob_mod: Type[pyspark.ml.Model],
         'accuracy'  : float
     """
     if metrics_args is None:
-        metrics_args = {"transform_df":True}
+        metrics_args = {"transform_df" : True}
 
     if train_df is None:
         train_prob_mod_perf = None
