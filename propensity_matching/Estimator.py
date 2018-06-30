@@ -336,7 +336,7 @@ class PropensityEstimator:
         num_1 = self.df.where(F.col(label_col) == 1).count()
         num_0 = self.df.where(F.col(label_col) == 0).count()
 
-        logging.getLogger(__name__).info("rebalancing df to {class_balance} with pos count {n_pos} and neg count {n_neg}".format(n_pos=num_1, n_neg=num_0, class_balance=self.fit_data_prep_args['class_balance']))
+        logging.getLogger(__name__).info("rebalancing df to {class_balance} with pos count {n_pos:,} and neg count {n_neg:,}".format(n_pos=num_1, n_neg=num_0, class_balance=self.fit_data_prep_args['class_balance']))
 
         if num_1 > num_0:
             raise NotImplementedError("class rebalance not implemented for class 1 > class 0")

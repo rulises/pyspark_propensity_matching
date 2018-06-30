@@ -173,7 +173,7 @@ def _transform(df: DataFrame,
             method = 'quantile'
             logging.getLogger(__name__).info("auto method is quantile")
 
-    logging.getLogger(__name__).info("metris is {metric}".format(metric=str(metric)))
+    logging.getLogger(__name__).info("metric is {metric}".format(metric=str(metric)))
     if metric is None:
         metric = 'probability'
         logging.getLogger(__name__).info("assigning default metric 'probability'")
